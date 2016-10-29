@@ -197,6 +197,10 @@ func (watcher *FsWatcher) debugf(text string, vals ...interface{}) {
 	l.Debugf(watcher.folderID + ": " + text, vals...)
 }
 
+func (watcher *FsWatcher) UpdateIgnores(ignores *ignore.Matcher) {
+	watcher.ignores = ignores
+}
+
 func (batch FsEventsBatch) GetPaths() []string {
 	var paths []string
 	for _, event := range batch {
