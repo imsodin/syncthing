@@ -22,11 +22,17 @@ import (
 
 type FsEvent struct {
 	path string
+	time time.Time
 }
 
 var Tempnamer scanner.TempNamer
 
 type FsEventsBatch map[string]*FsEvent
+
+type trackedDir struct {
+	count       int
+	childEvents map[string]*FsEvent
+}
 
 type FsWatcher struct {
 	folderPath            string
@@ -35,17 +41,23 @@ type FsWatcher struct {
 	fsEventChan           <-chan notify.EventInfo
 	WatchingFs            bool
 	notifyDelay           time.Duration
+	scanDelay             time.Duration
+	lastScanNotification  time.Time
 	notifyTimer           *time.Timer
 	notifyTimerNeedsReset bool
 	inProgress            map[string]struct{}
 	ignores               *ignore.Matcher
 	ignoresLock           sync.RWMutex
 	folderID              string
+	trackedDirs           map[string]*trackedDir
 }
 
 const (
 	slowNotifyDelay = time.Duration(60) * time.Second
 	fastNotifyDelay = time.Duration(500) * time.Millisecond
+	scanDelay       = time.Duration(1) * time.Second
+	maxFiles        = 512
+	maxFilesPerDir  = 128
 )
 
 func NewFsWatcher(folderPath string, ignores *ignore.Matcher, folderID string) *FsWatcher {
@@ -61,6 +73,7 @@ func NewFsWatcher(folderPath string, ignores *ignore.Matcher, folderID string) *
 		ignores:               ignores,
 		ignoresLock:           sync.NewRWMutex(),
 		folderID:              folderID,
+		trackedDirs:           make(map[string]*trackedDir),
 	}
 }
 
@@ -75,8 +88,6 @@ func (watcher *FsWatcher) StartWatchingFilesystem() (<-chan FsEventsBatch, error
 	watcher.notifyModelChan = notifyModelChan
 	return notifyModelChan, err
 }
-
-var maxFiles = 512
 
 func (watcher *FsWatcher) setupNotifications() (chan notify.EventInfo, error) {
 	c := make(chan notify.EventInfo, maxFiles)
@@ -112,10 +123,11 @@ func (watcher *FsWatcher) watchFilesystem() {
 }
 
 func (watcher *FsWatcher) newFsEvent(eventPath string) *FsEvent {
-	if isSubpath(eventPath, watcher.folderPath) {
+	if len(watcher.fsEvents) < maxFiles &&
+		isSubpath(eventPath, watcher.folderPath) {
 		path, _ := filepath.Rel(watcher.folderPath, eventPath)
 		if !watcher.shouldIgnore(path) {
-			return &FsEvent{path}
+			return &FsEvent{path, time.Now()}
 		}
 	}
 	return nil
@@ -166,13 +178,63 @@ func (watcher *FsWatcher) storeFsEvent(event *FsEvent) {
 
 func (watcher *FsWatcher) actOnTimer() {
 	watcher.notifyTimerNeedsReset = true
-	if len(watcher.fsEvents) > 0 {
-		watcher.debugf("Notifying about %d fs events\n", len(watcher.fsEvents))
-		watcher.notifyModelChan <- watcher.fsEvents
+	if len(watcher.fsEvents) > maxFiles {
+		if time.Now().Sub(watcher.lastScanNotification) > scanDelay {
+			fsEvents := make(FsEventsBatch)
+			fsEvents[""] = &FsEvent{"", time.Now()}
+			watcher.debugf("Too many changes, issuing full rescan.")
+			watcher.notifyModelChan <- fsEvents
+			watcher.fsEvents = make(FsEventsBatch)
+			watcher.trackedDirs = make(map[string]*trackedDir)
+		}
+	} else if len(watcher.fsEvents) > 0 {
+		watcher.aggregateChanges()
+		if time.Now().Sub(watcher.lastScanNotification) > scanDelay {
+			watcher.debugf("Notifying about %d fs events\n", len(watcher.fsEvents))
+			oldFsEvents := make(FsEventsBatch)
+			currTime := time.Now()
+			for path, event := range watcher.fsEvents {
+				if currTime.Sub(event.time) > scanDelay {
+					oldFsEvents[path] = event
+					delete(watcher.fsEvents, path)
+					delete(watcher.trackedDirs, path)
+					watcher.trackedDirs[filepath.Dir(path)].count--
+				}
+			}
+			watcher.notifyModelChan <- oldFsEvents
+		}
 	} else {
 		watcher.slowDownNotifyTimer()
 	}
-	watcher.fsEvents = make(FsEventsBatch)
+}
+
+func (watcher *FsWatcher) aggregateChanges() {
+	for path, event := range watcher.fsEvents {
+		dir := filepath.Dir(path)
+		if parentEvent, ok := watcher.fsEvents[dir]; ok {
+			watcher.debugf("Aggregating: Parent directory of %s already tracked.", path)
+			if event.time.Before(parentEvent.time) {
+				parentEvent.time = event.time
+			}
+			delete(watcher.fsEvents, path)
+		} else if watcher.trackedDirs[dir].count == maxFilesPerDir {
+			watcher.debugf("Aggregating: Dir %s contains more than %d events, scan it entirely",
+				dir, maxFilesPerDir)
+			watcher.fsEvents[dir] = &FsEvent{dir, event.time}
+			parentEvent := watcher.fsEvents[dir]
+			delete(watcher.fsEvents, path)
+			for childPath, childEvent := range watcher.trackedDirs[dir].childEvents {
+				if childEvent.time.Before(parentEvent.time) {
+					parentEvent.time = event.time
+				}
+				delete(watcher.fsEvents, childPath)
+			}
+			delete(watcher.trackedDirs, dir)
+		} else {
+			watcher.trackedDirs[dir].count++
+			watcher.trackedDirs[dir].childEvents[path] = event
+		}
+	}
 }
 
 func (watcher *FsWatcher) events() []*FsEvent {
