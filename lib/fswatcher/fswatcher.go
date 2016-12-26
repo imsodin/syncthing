@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/scanner"
 	"github.com/syncthing/syncthing/lib/ignore"
@@ -62,15 +63,16 @@ const (
 	maxFilesPerDir  = 128
 )
 
-func NewFsWatcher(folderPath string, folderID string, ignores *ignore.Matcher) *FsWatcher {
+func NewFsWatcher(folderPath string, folderID string, ignores *ignore.Matcher,
+	folderCfg config.FolderConfiguration) *FsWatcher {
 	return &FsWatcher{
 		folderPath:            folderPath,
 		notifyModelChan:       nil,
 		fsEventDirs:           make(map[string]*eventDir),
 		fsEventChan:           nil,
 		WatchingFs:            false,
-		notifyDelay:           time.Duration(1) * time.Second,
-		notifyTimeout:         time.Duration(5) * time.Second,
+		notifyDelay:           time.Duration(folderCfg.NotifyDelayS) * time.Second,
+		notifyTimeout:         notifyTimeout(folderCfg.NotifyDelayS),
 		notifyTimerNeedsReset: false,
 		inProgress:            make(map[string]struct{}),
 		folderID:              folderID,
@@ -392,4 +394,14 @@ func (dir eventDir) getFirstModTime() (firstModTime time.Time) {
 		}
 	}
 	return
+}
+
+func notifyTimeout(eventDelayS int) time.Duration {
+	if eventDelayS < 12 {
+		return time.Duration(eventDelayS * 5) * time.Second
+	}
+	if eventDelayS < 60 {
+		return time.Duration(1) * time.Minute
+	}
+	return time.Duration(eventDelayS) * time.Second
 }

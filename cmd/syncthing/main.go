@@ -960,6 +960,7 @@ func defaultConfig(myName string) config.Configuration {
 		defaultFolder.Label = "Default Folder (" + folderID + ")"
 		defaultFolder.RescanIntervalS = 60
 		defaultFolder.LongRescanIntervalS = 60 * 60
+		defaultFolder.NotifyDelayS = 1
 		defaultFolder.MinDiskFreePct = 1
 		defaultFolder.Devices = []config.FolderDeviceConfiguration{{DeviceID: myID}}
 		defaultFolder.AutoNormalize = true

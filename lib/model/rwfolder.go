@@ -191,11 +191,17 @@ func (f *rwFolder) Serve() {
 	fswatcher.Tempnamer = defTempNamer
 	f.model.fmut.RLock()
 	fsWatcher := fswatcher.NewFsWatcher(f.dir, f.folderID,
-		f.model.folderIgnores[f.folderID])
+		f.model.folderIgnores[f.folderID],
+		f.model.folderCfgs[f.folderID])
 	f.model.fmut.RUnlock()
-	fsWatchChan, err := fsWatcher.StartWatchingFilesystem()
-	if err != nil {
-		l.Warnf(`Folder "%s": Starting FS notifications failed: %s`, f.folderID, err)
+	var fsWatchChan <-chan fswatcher.FsEventsBatch
+	if f.model.folderCfgs[f.folderID].NotifyDelayS != 0 {
+		var err error
+		fsWatchChan, err = fsWatcher.StartWatchingFilesystem()
+		if err != nil {
+			l.Warnf(`Folder "%s": Starting FS notifications failed: %s`,
+				f.folderID, err)
+		}
 	}
 
 	for {
