@@ -16,8 +16,8 @@ import (
 
 	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/events"
-	"github.com/syncthing/syncthing/lib/scanner"
 	"github.com/syncthing/syncthing/lib/ignore"
+	"github.com/syncthing/syncthing/lib/scanner"
 )
 
 type FsEvent struct {
@@ -59,8 +59,8 @@ type FsWatcher struct {
 }
 
 const (
-	maxFiles        = 512
-	maxFilesPerDir  = 128
+	maxFiles       = 512
+	maxFilesPerDir = 128
 )
 
 func NewFsWatcher(folderPath string, folderID string, ignores *ignore.Matcher,
@@ -122,28 +122,28 @@ func (watcher *FsWatcher) watchFilesystem() {
 
 func (watcher *FsWatcher) newFsEvent(eventPath string) {
 	if watcher.eventCount() == maxFiles {
-		watcher.debugf("Tracking too many events; dropping: %s\n", eventPath)
+		watcher.debugf("Tracking too many events; dropping: %s", eventPath)
 		return
 	}
 	if rootDir, ok := watcher.fsEventDirs["."]; ok {
 		if _, ok := rootDir.events["."]; ok {
-		        watcher.debugf("Will scan entire folder anyway; dropping: %s\n", eventPath)
+			watcher.debugf("Will scan entire folder anyway; dropping: %s", eventPath)
 			return
 		}
 	}
 	if isSubpath(eventPath, watcher.folderPath) {
 		path, _ := filepath.Rel(watcher.folderPath, eventPath)
 		if watcher.pathInProgress(path) {
-			watcher.debugf("Skipping notification for path we modified: %s\n",	path)
+			watcher.debugf("Skipping notification for path we modified: %s", path)
 			return
 		}
 		if watcher.shouldIgnore(path) {
-			watcher.debugf("Ignoring: %s\n", path)
+			watcher.debugf("Ignoring: %s", path)
 			return
 		}
 		watcher.aggregateEvent(path, time.Now())
 	} else {
-		watcher.debugf("Bug: Detected change outside of folder, droping: %s\n", eventPath)
+		watcher.debugf("Bug: Detected change outside of folder, dropping: %s", eventPath)
 	}
 }
 
@@ -198,7 +198,7 @@ func (watcher *FsWatcher) aggregateEvent(path string, eventTime time.Time) {
 	}
 	parentDir := watcher.fsEventDirs["."]
 	var currPath string
-	for _, pathSegment := range pathSegments[:len(pathSegments) - 1] {
+	for _, pathSegment := range pathSegments[:len(pathSegments)-1] {
 		currPath = filepath.Join(currPath, pathSegment)
 		if event, ok := parentDir.events[currPath]; ok {
 			event.lastModTime = eventTime
@@ -209,9 +209,9 @@ func (watcher *FsWatcher) aggregateEvent(path string, eventTime time.Time) {
 		if _, ok := watcher.fsEventDirs[currPath]; !ok {
 			watcher.fsEventDirs[currPath] = newEventDir()
 			parentDir.dirs[currPath] = watcher.fsEventDirs[currPath]
-			if len(parentDir.events) + len(parentDir.dirs) == localMaxFilesPerDir {
-				watcher.debugf("Aggregating: Parent dir already contains %d " +
-					"events, track it instead: %s",	localMaxFilesPerDir, path)
+			if len(parentDir.events)+len(parentDir.dirs) == localMaxFilesPerDir {
+				watcher.debugf("Aggregating: Parent dir already contains %d "+
+					"events, track it instead: %s", localMaxFilesPerDir, path)
 				watcher.aggregateEvent(filepath.Dir(currPath), eventTime)
 				return
 			}
@@ -239,35 +239,35 @@ func (watcher *FsWatcher) aggregateEvent(path string, eventTime time.Time) {
 func (watcher *FsWatcher) actOnTimer() {
 	eventCount := watcher.eventCount()
 	if eventCount == 0 {
+		watcher.debugf("No tracked events, waiting for new event.")
 		watcher.notifyTimerNeedsReset = true
 		return
 	}
-	oldFsEvents := make(FsEventsBatch)
+	oldEvents := make(FsEventsBatch)
 	if eventCount == maxFiles {
 		watcher.debugf("Too many changes, issuing full rescan.")
 		currTime := time.Now()
-		oldFsEvents["."] = &FsEvent{".", currTime, currTime}
+		oldEvents["."] = &FsEvent{".", currTime, currTime}
 		watcher.fsEventDirs = make(map[string]*eventDir)
 	} else {
-		oldFsEvents = watcher.getOldEvents(time.Now())
-		watcher.removeEvents(oldFsEvents)
+		oldEvents = watcher.getOldEvents(time.Now())
+		watcher.removeEvents(oldEvents)
 	}
 	// Sending to channel might block for a long time, but we need to keep
 	// reading from notify backend channel to avoid overflow
-	if len(oldFsEvents) != 0 {
-		go func () {
+	if len(oldEvents) != 0 {
+		go func() {
 			timeBeforeSending := time.Now()
-			watcher.debugf("Notifying about %d fs events\n",
-				len(oldFsEvents))
-			watcher.notifyModelChan <- oldFsEvents
+			watcher.debugf("Notifying about %d fs events", len(oldEvents))
+			watcher.notifyModelChan <- oldEvents
 			if watcher.eventCount() != 0 {
 				// If sending to channel blocked for a long time,
 				// shorten next notifyDelay accordingly.
 				duration := time.Since(timeBeforeSending)
 				buffer := time.Duration(1) * time.Millisecond
-				if duration < watcher.notifyDelay / 10 {
+				if duration < watcher.notifyDelay/10 {
 					watcher.resetNotifyTimer()
-				} else if duration + buffer > watcher.notifyDelay {
+				} else if duration+buffer > watcher.notifyDelay {
 					watcher.setNotifyTimer(buffer)
 				} else {
 					watcher.setNotifyTimer(watcher.notifyDelay - duration)
@@ -278,16 +278,9 @@ func (watcher *FsWatcher) actOnTimer() {
 			}
 		}()
 	} else {
+		watcher.debugf("No old fs events")
 		watcher.resetNotifyTimer()
 	}
-}
-
-func (watcher *FsWatcher) events() []*FsEvent {
-	list := make([]*FsEvent, 0, len(watcher.fsEvents))
-	for _, event := range watcher.fsEvents {
-		list = append(list, event)
-	}
-	return list
 }
 
 func (watcher *FsWatcher) updateInProgressSet(event events.Event) {
@@ -311,7 +304,7 @@ func (watcher *FsWatcher) pathInProgress(path string) bool {
 }
 
 func (watcher *FsWatcher) debugf(text string, vals ...interface{}) {
-	l.Debugf(watcher.folderID + ": " + text, vals...)
+	l.Debugf(watcher.folderID+": "+text, vals...)
 }
 
 func (watcher *FsWatcher) UpdateIgnores(ignores *ignore.Matcher) {
@@ -331,7 +324,7 @@ func (watcher *FsWatcher) getOldEvents(currTime time.Time) FsEventsBatch {
 		for path, event := range dir.events {
 			// 2 * results in mean event age of notifyDelay
 			// (assuming randomly occurring events)
-			if 2 * currTime.Sub(event.lastModTime) > watcher.notifyDelay ||
+			if 2*currTime.Sub(event.lastModTime) > watcher.notifyDelay ||
 				currTime.Sub(event.firstModTime) > watcher.notifyTimeout {
 				watcher.debugf("Found old event %s", path)
 				oldEvents[path] = event
@@ -347,7 +340,7 @@ func (watcher *FsWatcher) removeEvents(events FsEventsBatch) {
 		dir := watcher.fsEventDirs[parentPath]
 		watcher.debugf("Removing from fsEvents: %s", path)
 		delete(dir.events, path)
-		if len(dir.events) + len(dir.dirs) == 0 {
+		if len(dir.events)+len(dir.dirs) == 0 {
 			watcher.removeDir(parentPath)
 		}
 	}
@@ -359,7 +352,7 @@ func (watcher *FsWatcher) removeDir(path string) {
 		parentPath := filepath.Dir(path)
 		dir := watcher.fsEventDirs[parentPath]
 		delete(dir.dirs, path)
-		if len(dir.events) + len(dir.dirs) == 0 {
+		if len(dir.events)+len(dir.dirs) == 0 {
 			watcher.removeDir(parentPath)
 		}
 	}
@@ -398,7 +391,7 @@ func (dir eventDir) getFirstModTime() (firstModTime time.Time) {
 
 func notifyTimeout(eventDelayS int) time.Duration {
 	if eventDelayS < 12 {
-		return time.Duration(eventDelayS * 5) * time.Second
+		return time.Duration(eventDelayS*5) * time.Second
 	}
 	if eventDelayS < 60 {
 		return time.Duration(1) * time.Minute
