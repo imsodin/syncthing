@@ -250,12 +250,18 @@ func (watcher *FsWatcher) actOnTimer() {
 		oldFsEvents = watcher.getOldEvents(time.Now())
 		watcher.removeEvents(oldFsEvents)
 	}
+	// Sending to channel might block for a long time, but we need to keep
+	// reading from notify backend channel to avoid overflow
 	if len(oldFsEvents) != 0 {
-		watcher.debugf("Notifying about %d fs events\n",
-			len(oldFsEvents))
-		watcher.notifyModelChan <- oldFsEvents
+		go func () {
+			watcher.debugf("Notifying about %d fs events\n",
+				len(oldFsEvents))
+			watcher.notifyModelChan <- oldFsEvents
+			watcher.resetNotifyTimer()
+		}()
+	} else {
+		watcher.resetNotifyTimer()
 	}
-        watcher.resetNotifyTimer()
 }
 
 func (watcher *FsWatcher) events() []*FsEvent {
