@@ -29,6 +29,7 @@ const (
 	DevicePaused
 	DeviceResumed
 	LocalChangeDetected
+	RemoteChangeDetected
 	LocalIndexUpdated
 	RemoteIndexUpdated
 	ItemStarted
@@ -42,6 +43,8 @@ const (
 	FolderCompletion
 	FolderErrors
 	FolderScanProgress
+	FolderPaused
+	FolderResumed
 	ListenAddressesChanged
 	LoginAttempt
 
@@ -68,6 +71,8 @@ func (t EventType) String() string {
 		return "DeviceRejected"
 	case LocalChangeDetected:
 		return "LocalChangeDetected"
+	case RemoteChangeDetected:
+		return "RemoteChangeDetected"
 	case LocalIndexUpdated:
 		return "LocalIndexUpdated"
 	case RemoteIndexUpdated:
@@ -98,6 +103,10 @@ func (t EventType) String() string {
 		return "DeviceResumed"
 	case FolderScanProgress:
 		return "FolderScanProgress"
+	case FolderPaused:
+		return "FolderPaused"
+	case FolderResumed:
+		return "FolderResumed"
 	case ListenAddressesChanged:
 		return "ListenAddressesChanged"
 	case LoginAttempt:
