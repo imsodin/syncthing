@@ -55,7 +55,7 @@ var blocks = []protocol.BlockInfo{
 
 var folders = []string{"default"}
 
-func setUpFile(filename string, blockNumbers []int) protocol.FileInfo {
+func setupFile(filename string, blockNumbers []int) protocol.FileInfo {
 	// Create existing file
 	existingBlocks := make([]protocol.BlockInfo, len(blockNumbers))
 	for i := range blockNumbers {
@@ -68,7 +68,7 @@ func setUpFile(filename string, blockNumbers []int) protocol.FileInfo {
 	}
 }
 
-func setUpModel(file protocol.FileInfo) *Model {
+func setupModel(file protocol.FileInfo) *Model {
 	db := db.OpenMemory()
 	model := NewModel(defaultConfig, protocol.LocalDeviceID, "device", "syncthing", "dev", db, nil)
 	model.AddFolder(defaultFolderConfig)
@@ -77,11 +77,12 @@ func setUpModel(file protocol.FileInfo) *Model {
 	return model
 }
 
-func setUpSendReceiveFolder(model *Model) sendReceiveFolder {
-	return sendReceiveFolder{
+func setupSendReceiveFolder(model *Model) *sendReceiveFolder {
+	f := &sendReceiveFolder{
 		folder: folder{
-			stateTracker: newStateTracker("default"),
-			model:        model,
+			stateTracker:         newStateTracker("default"),
+			model:                model,
+			initialScanCompleted: make(chan struct{}),
 		},
 
 		mtimeFS:   fs.NewMtimeFS(db.NewNamespacedKV(model.db, "mtime")),
@@ -90,6 +91,11 @@ func setUpSendReceiveFolder(model *Model) sendReceiveFolder {
 		errors:    make(map[string]string),
 		errorsMut: sync.NewMutex(),
 	}
+
+	// Folders are never actually started, so no initial scan will be done
+	close(f.initialScanCompleted)
+
+	return f
 }
 
 // Layout of the files: (indexes from the above array)
@@ -103,12 +109,12 @@ func TestHandleFile(t *testing.T) {
 	// Pull: 1, 3, 4, 6, 7
 
 	existingBlocks := []int{0, 2, 0, 0, 5, 0, 0, 8}
-	existingFile := setUpFile("filex", existingBlocks)
+	existingFile := setupFile("filex", existingBlocks)
 	requiredFile := existingFile
 	requiredFile.Blocks = blocks[1:]
 
-	m := setUpModel(existingFile)
-	f := setUpSendReceiveFolder(m)
+	m := setupModel(existingFile)
+	f := setupSendReceiveFolder(m)
 	copyChan := make(chan copyBlocksState, 1)
 
 	f.handleFile(requiredFile, copyChan, nil)
@@ -144,12 +150,12 @@ func TestHandleFileWithTemp(t *testing.T) {
 	// Pull: 1, 6
 
 	existingBlocks := []int{0, 2, 0, 0, 5, 0, 0, 8}
-	existingFile := setUpFile("file", existingBlocks)
+	existingFile := setupFile("file", existingBlocks)
 	requiredFile := existingFile
 	requiredFile.Blocks = blocks[1:]
 
-	m := setUpModel(existingFile)
-	f := setUpSendReceiveFolder(m)
+	m := setupModel(existingFile)
+	f := setupSendReceiveFolder(m)
 	copyChan := make(chan copyBlocksState, 1)
 
 	f.handleFile(requiredFile, copyChan, nil)
@@ -191,13 +197,13 @@ func TestCopierFinder(t *testing.T) {
 	}
 
 	existingBlocks := []int{0, 2, 3, 4, 0, 0, 7, 0}
-	existingFile := setUpFile(ignore.TempName("file"), existingBlocks)
+	existingFile := setupFile(ignore.TempName("file"), existingBlocks)
 	requiredFile := existingFile
 	requiredFile.Blocks = blocks[1:]
 	requiredFile.Name = "file2"
 
-	m := setUpModel(existingFile)
-	f := setUpSendReceiveFolder(m)
+	m := setupModel(existingFile)
+	f := setupSendReceiveFolder(m)
 	copyChan := make(chan copyBlocksState)
 	pullChan := make(chan pullBlockState, 4)
 	finisherChan := make(chan *sharedPullerState, 1)
@@ -320,8 +326,8 @@ func TestWeakHash(t *testing.T) {
 	}
 
 	// Setup the model/pull environment
-	m := setUpModel(existingFile)
-	fo := setUpSendReceiveFolder(m)
+	m := setupModel(existingFile)
+	fo := setupSendReceiveFolder(m)
 	copyChan := make(chan copyBlocksState)
 	pullChan := make(chan pullBlockState, expectBlocks)
 	finisherChan := make(chan *sharedPullerState, 1)
@@ -387,8 +393,8 @@ func TestCopierCleanup(t *testing.T) {
 	}
 
 	// Create a file
-	file := setUpFile("test", []int{0})
-	m := setUpModel(file)
+	file := setupFile("test", []int{0})
+	m := setupModel(file)
 
 	file.Blocks = []protocol.BlockInfo{blocks[1]}
 	file.Version = file.Version.Update(protocol.LocalDeviceID.Short())
@@ -422,8 +428,8 @@ func TestCopierCleanup(t *testing.T) {
 func TestLastResortPulling(t *testing.T) {
 	// Add a file to index (with the incorrect block representation, as content
 	// doesn't actually match the block list)
-	file := setUpFile("empty", []int{0})
-	m := setUpModel(file)
+	file := setupFile("empty", []int{0})
+	m := setupModel(file)
 
 	// Pretend that we are handling a new file of the same content but
 	// with a different name (causing to copy that particular block)
@@ -433,7 +439,7 @@ func TestLastResortPulling(t *testing.T) {
 		return true
 	}
 
-	f := setUpSendReceiveFolder(m)
+	f := setupSendReceiveFolder(m)
 
 	copyChan := make(chan copyBlocksState)
 	pullChan := make(chan pullBlockState, 1)
@@ -463,7 +469,7 @@ func TestLastResortPulling(t *testing.T) {
 }
 
 func TestDeregisterOnFailInCopy(t *testing.T) {
-	file := setUpFile("filex", []int{0, 2, 0, 0, 5, 0, 0, 8})
+	file := setupFile("filex", []int{0, 2, 0, 0, 5, 0, 0, 8})
 	defer os.Remove("testdata/" + ignore.TempName("filex"))
 
 	db := db.OpenMemory()
@@ -471,7 +477,7 @@ func TestDeregisterOnFailInCopy(t *testing.T) {
 	m := NewModel(defaultConfig, protocol.LocalDeviceID, "device", "syncthing", "dev", db, nil)
 	m.AddFolder(defaultFolderConfig)
 
-	f := setUpSendReceiveFolder(m)
+	f := setupSendReceiveFolder(m)
 
 	// queue.Done should be called by the finisher routine
 	f.queue.Push("filex", 0, time.Time{})
@@ -537,14 +543,14 @@ func TestDeregisterOnFailInCopy(t *testing.T) {
 }
 
 func TestDeregisterOnFailInPull(t *testing.T) {
-	file := setUpFile("filex", []int{0, 2, 0, 0, 5, 0, 0, 8})
+	file := setupFile("filex", []int{0, 2, 0, 0, 5, 0, 0, 8})
 	defer os.Remove("testdata/" + ignore.TempName("filex"))
 
 	db := db.OpenMemory()
 	m := NewModel(defaultConfig, protocol.LocalDeviceID, "device", "syncthing", "dev", db, nil)
 	m.AddFolder(defaultFolderConfig)
 
-	f := setUpSendReceiveFolder(m)
+	f := setupSendReceiveFolder(m)
 
 	// queue.Done should be called by the finisher routine
 	f.queue.Push("filex", 0, time.Time{})

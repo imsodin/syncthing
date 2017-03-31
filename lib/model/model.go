@@ -983,7 +983,7 @@ func (m *Model) handleIntroductions(introducerCfg config.DeviceConfiguration, cm
 	return foldersDevices, changed
 }
 
-// handleIntroductions handles removals of devices/shares that are removed by an introducer device
+// handleDeintroductions handles removals of devices/shares that are removed by an introducer device
 func (m *Model) handleDeintroductions(introducerCfg config.DeviceConfiguration, cm protocol.ClusterConfig, foldersDevices folderDeviceSet) bool {
 	changed := false
 	foldersIntroducedByOthers := make(folderDeviceSet)
