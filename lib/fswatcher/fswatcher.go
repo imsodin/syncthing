@@ -12,6 +12,7 @@ import (
 	"github.com/zillode/notify"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/syncthing/syncthing/lib/config"
@@ -65,7 +66,8 @@ type fsWatcher struct {
 	notifyTimeout         time.Duration
 	notifyTimer           *time.Timer
 	notifyTimerNeedsReset bool
-	inProgress            map[string]struct{}
+	inProgress            map[string]int
+	inProgressLock        sync.RWMutex                                           // protects the above
 	description           string
 	ignores               *ignore.Matcher
 	ignoresUpdate         chan *ignore.Matcher
@@ -96,7 +98,7 @@ func NewFsWatcher(cfg config.FolderConfiguration, ignores *ignore.Matcher) (Serv
 		notifyDelay:           time.Duration(cfg.NotifyDelayS) * time.Second,
 		notifyTimeout:         notifyTimeout(cfg.NotifyDelayS),
 		notifyTimerNeedsReset: false,
-		inProgress:            make(map[string]struct{}),
+		inProgress:            make(map[string]int),
 		description:           cfg.Description(),
 		ignores:               ignores,
 		ignoresUpdate:         make(chan *ignore.Matcher),
@@ -387,15 +389,39 @@ func (watcher *fsWatcher) popOldEvents(dir *eventDir, currTime time.Time) FsEven
 func (watcher *fsWatcher) updateInProgressSet(event events.Event) {
 	if event.Type == events.ItemStarted {
 		path := event.Data.(map[string]string)["item"]
-		watcher.inProgress[path] = struct{}{}
-	} else if event.Type == events.ItemFinished {
-		path := event.Data.(map[string]interface{})["item"].(string)
-		delete(watcher.inProgress, path)
+		watcher.inProgressLock.Lock()
+		if _, ok := watcher.inProgress[path]; ok {
+			watcher.inProgress[path]++
+			return
+		}
+		l.Debugln(watcher, "Syncthing is handling", path)
+		watcher.inProgress[path] = 1
+		watcher.inProgressLock.Unlock()
+		return
 	}
+	if event.Type == events.ItemFinished {
+		path := event.Data.(map[string]interface{})["item"].(string)
+		go func() {
+			time.Sleep(time.Duration(100) * time.Millisecond)
+			watcher.inProgressLock.Lock()
+			if _, ok := watcher.inProgress[path]; !ok {
+				return
+			}
+			watcher.inProgress[path]--
+			if watcher.inProgress[path] == 0 {
+				delete(watcher.inProgress, path)
+				l.Debugln(watcher, "Syncthing finished handling", path)
+			}
+			watcher.inProgressLock.Unlock()
+		}()
+	}
+	l.Warnln(watcher, "Wrong REST event type:", event.Type)
 }
 
 func (watcher *fsWatcher) pathInProgress(path string) bool {
+	watcher.inProgressLock.RLock()
 	_, exists := watcher.inProgress[path]
+	watcher.inProgressLock.RUnlock()
 	return exists
 }
 
