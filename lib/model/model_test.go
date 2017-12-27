@@ -2904,11 +2904,7 @@ func TestPausedFolders(t *testing.T) {
 	}
 }
 
-func TestPullInvalid(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("Windows only")
-	}
-
+func pullInvalidIgnored(t *testing.T, ft config.FolderType) {
 	tmpDir, err := ioutil.TempDir(".", "_model-")
 	if err != nil {
 		panic("Failed to create temporary testing dir")
@@ -2917,6 +2913,7 @@ func TestPullInvalid(t *testing.T) {
 
 	cfg := defaultConfig.RawCopy()
 	cfg.Folders[0] = config.NewFolderConfiguration(protocol.LocalDeviceID, "default", "default", fs.FilesystemTypeBasic, tmpDir)
+	cfg.Folders[0].Type = ft
 	cfg.Folders[0].Devices = []config.FolderDeviceConfiguration{{DeviceID: device1}}
 	w := config.Wrap("/tmp/cfg", cfg)
 
@@ -2982,6 +2979,14 @@ func TestPullInvalid(t *testing.T) {
 
 		return
 	}
+}
+
+func TestPullInvalidIgnoredSO(t *testing.T) {
+	pullInvalidIgnored(t, config.FolderTypeSendOnly)
+}
+
+func TestPullInvalidIgnoredSR(t *testing.T) {
+	pullInvalidIgnored(t, config.FolderTypeSendReceive)
 }
 
 func addFakeConn(m *Model, dev protocol.DeviceID) *fakeConnection {

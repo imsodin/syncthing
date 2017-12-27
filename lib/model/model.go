@@ -820,23 +820,39 @@ func (m *Model) RemoteNeedFolderFiles(device protocol.DeviceID, folder string, p
 // Index is called when a new device is connected and we receive their full index.
 // Implements the protocol.Model interface.
 func (m *Model) Index(deviceID protocol.DeviceID, folder string, fs []protocol.FileInfo) {
-	l.Debugf("IDX(in): %s %q: %d files", deviceID, folder, len(fs))
+	m.handleIndex(deviceID, folder, fs, false)
+}
+
+// IndexUpdate is called for incremental updates to connected devices' indexes.
+// Implements the protocol.Model interface.
+func (m *Model) IndexUpdate(deviceID protocol.DeviceID, folder string, fs []protocol.FileInfo) {
+	m.handleIndex(deviceID, folder, fs, false)
+}
+
+func (m *Model) handleIndex(deviceID protocol.DeviceID, folder string, fs []protocol.FileInfo, update bool) {
+	op := "Index"
+	if update {
+		op += "update"
+	}
+
+	l.Debugf("%v %v(in): %s / %q: %d files", m, op, deviceID, folder, len(fs))
 
 	if !m.folderSharedWith(folder, deviceID) {
-		l.Debugf("Unexpected folder ID %q sent from device %q; ensure that the folder exists and that this device is selected under \"Share With\" in the folder configuration.", folder, deviceID)
+		l.Debugf("%v for unexpected folder ID %q sent from device %q; ensure that the folder exists and that this device is selected under \"Share With\" in the folder configuration.", op, folder, deviceID)
 		return
 	}
 
 	m.fmut.RLock()
-	files, ok := m.folderFiles[folder]
-	runner := m.folderRunners[folder]
+	files, existing := m.folderFiles[folder]
+	ignores := m.folderIgnores[folder]
+	runner, running := m.folderRunners[folder]
 	m.fmut.RUnlock()
 
-	if !ok {
-		l.Fatalf("Index for nonexistent folder %q", folder)
+	if !existing {
+		l.Fatalf("%v for nonexistent folder %q", op, folder)
 	}
 
-	if runner != nil {
+	if running {
 		// Runner may legitimately not be set if this is the "cleanup" Index
 		// message at startup.
 		defer runner.SchedulePull()
@@ -846,40 +862,9 @@ func (m *Model) Index(deviceID protocol.DeviceID, folder string, fs []protocol.F
 	m.deviceDownloads[deviceID].Update(folder, makeForgetUpdate(fs))
 	m.pmut.RUnlock()
 
-	files.Drop(deviceID)
-	files.Update(deviceID, fs)
-
-	events.Default.Log(events.RemoteIndexUpdated, map[string]interface{}{
-		"device":  deviceID.String(),
-		"folder":  folder,
-		"items":   len(fs),
-		"version": files.Sequence(deviceID),
-	})
-}
-
-// IndexUpdate is called for incremental updates to connected devices' indexes.
-// Implements the protocol.Model interface.
-func (m *Model) IndexUpdate(deviceID protocol.DeviceID, folder string, fs []protocol.FileInfo) {
-	l.Debugf("%v IDXUP(in): %s / %q: %d files", m, deviceID, folder, len(fs))
-
-	if !m.folderSharedWith(folder, deviceID) {
-		l.Debugf("Update for unexpected folder ID %q sent from device %q; ensure that the folder exists and that this device is selected under \"Share With\" in the folder configuration.", folder, deviceID)
-		return
+	if !update {
+		files.Drop(deviceID)
 	}
-
-	m.fmut.RLock()
-	files := m.folderFiles[folder]
-	runner, ok := m.folderRunners[folder]
-	m.fmut.RUnlock()
-
-	if !ok {
-		l.Fatalf("IndexUpdate for nonexistent folder %q", folder)
-	}
-
-	m.pmut.RLock()
-	m.deviceDownloads[deviceID].Update(folder, makeForgetUpdate(fs))
-	m.pmut.RUnlock()
-
 	files.Update(deviceID, fs)
 
 	events.Default.Log(events.RemoteIndexUpdated, map[string]interface{}{
@@ -889,7 +874,24 @@ func (m *Model) IndexUpdate(deviceID protocol.DeviceID, folder string, fs []prot
 		"version": files.Sequence(deviceID),
 	})
 
-	runner.SchedulePull()
+	// Filter ignored files already here instead of when pulling. Otherwise
+	// send-only folders will get out of sync because if ignored files.
+	id := m.id.Short()
+	invalidFs := make([]protocol.FileInfo, 0, len(fs))
+	for _, f := range fs {
+		if ignores.ShouldIgnore(f.Name) {
+			l.Debugln(m, "Invalidating file (ignored)", f.Name)
+			f.Invalidate(id)
+			invalidFs = append(invalidFs, f)
+		} else if runtime.GOOS == "windows" && f.IsSymlink() {
+			l.Debugln(f, "Invalidating symlink (unsupported)", f.Name)
+			f.Invalidate(id)
+			invalidFs = append(invalidFs, f)
+		}
+	}
+	if len(invalidFs) > 0 {
+		m.updateLocals(folder, invalidFs)
+	}
 }
 
 func (m *Model) folderSharedWith(folder string, deviceID protocol.DeviceID) bool {

@@ -72,7 +72,6 @@ const (
 	dbUpdateDeleteFile
 	dbUpdateShortcutFile
 	dbUpdateHandleSymlink
-	dbUpdateInvalidate
 )
 
 const (
@@ -378,18 +377,18 @@ func (f *sendReceiveFolder) pullerIteration(ignores *ignore.Matcher, ignoresChan
 
 	iterate(protocol.LocalDeviceID, func(intf db.FileIntf) bool {
 		if f.IgnoreDelete && intf.IsDeleted() {
-			l.Debugln(f, "ignore file deletion (config)", intf.FileName())
+			l.Debugln(f, "skip file deletion (config)", intf.FileName())
+			return true
+		}
+
+		if f.IgnoreDelete && intf.IsDeleted() {
+			l.Debugln(f, "skip ignored file", intf.FileName())
 			return true
 		}
 
 		file := intf.(protocol.FileInfo)
 
 		switch {
-		case ignores.ShouldIgnore(file.Name):
-			file.Invalidate(f.model.id.Short())
-			l.Debugln(f, "Handling ignored file", file)
-			dbUpdateChan <- dbUpdateJob{file, dbUpdateInvalidate}
-
 		case runtime.GOOS == "windows" && fs.WindowsInvalidFilename(file.Name):
 			f.newError("need", file.Name, fs.ErrInvalidFilename)
 			changed++
@@ -412,11 +411,6 @@ func (f *sendReceiveFolder) pullerIteration(ignores *ignore.Matcher, ignoresChan
 				}
 			}
 			l.Debugln(f, "Needed file is unavailable", file)
-
-		case runtime.GOOS == "windows" && file.IsSymlink():
-			file.Invalidate(f.model.id.Short())
-			l.Debugln(f, "Invalidating symlink (unsupported)", file.Name)
-			dbUpdateChan <- dbUpdateJob{file, dbUpdateInvalidate}
 
 		default:
 			// Directories, symlinks
@@ -1545,9 +1539,8 @@ func (f *sendReceiveFolder) dbUpdaterRoutine(dbUpdateChan <-chan dbUpdateJob) {
 				changedDirs[filepath.Dir(job.file.Name)] = struct{}{}
 			case dbUpdateHandleDir:
 				changedDirs[job.file.Name] = struct{}{}
-			case dbUpdateHandleSymlink, dbUpdateInvalidate:
-				// fsyncing symlinks is only supported by MacOS
-				// and invalidated files are db only changes -> no sync
+			case dbUpdateHandleSymlink:
+				// fsyncing symlinks is only supported by MacOS -> no sync
 			}
 
 			if job.file.IsInvalid() || (job.file.IsDirectory() && !job.file.IsSymlink()) {

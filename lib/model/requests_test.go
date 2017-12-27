@@ -49,6 +49,7 @@ func TestRequestSimple(t *testing.T) {
 	fc.addFile("testfile", 0644, protocol.FileInfoTypeFile, contents)
 	fc.sendIndexUpdate()
 	<-done
+	time.Sleep(time.Second)
 
 	// Verify the contents
 	bs, err := ioutil.ReadFile(filepath.Join(tmpFolder, "testfile"))
