@@ -42,6 +42,7 @@ const (
 	FolderCompletion
 	FolderErrors
 	FolderScanProgress
+	FolderScanWalkProgress
 	FolderPaused
 	FolderResumed
 	ListenAddressesChanged
@@ -102,6 +103,8 @@ func (t EventType) String() string {
 		return "DeviceResumed"
 	case FolderScanProgress:
 		return "FolderScanProgress"
+	case FolderScanWalkProgress:
+		return "FolderScanWalkProgress"
 	case FolderPaused:
 		return "FolderPaused"
 	case FolderResumed:
@@ -179,6 +182,8 @@ func UnmarshalEventType(s string) EventType {
 		return DeviceResumed
 	case "FolderScanProgress":
 		return FolderScanProgress
+	case "FolderScanWalkProgress":
+		return FolderScanWalkProgress
 	case "FolderPaused":
 		return FolderPaused
 	case "FolderResumed":

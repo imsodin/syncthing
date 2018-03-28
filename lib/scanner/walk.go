@@ -103,6 +103,11 @@ func (w *walker) walk(ctx context.Context) chan protocol.FileInfo {
 	toHashChan := make(chan protocol.FileInfo)
 	finishedChan := make(chan protocol.FileInfo)
 
+	// Defaults to every 2 seconds.
+	if w.ProgressTickIntervalS == 0 {
+		w.ProgressTickIntervalS = 2
+	}
+
 	// A routine which walks the filesystem tree, and sends files which have
 	// been modified to the counter routine.
 	go func() {
@@ -122,11 +127,6 @@ func (w *walker) walk(ctx context.Context) chan protocol.FileInfo {
 	if w.ProgressTickIntervalS < 0 {
 		newParallelHasher(ctx, w.Filesystem, w.BlockSize, w.Hashers, finishedChan, toHashChan, nil, nil, w.UseWeakHashes)
 		return finishedChan
-	}
-
-	// Defaults to every 2 seconds.
-	if w.ProgressTickIntervalS == 0 {
-		w.ProgressTickIntervalS = 2
 	}
 
 	ticker := time.NewTicker(time.Duration(w.ProgressTickIntervalS) * time.Second)
@@ -198,10 +198,20 @@ func (w *walker) walk(ctx context.Context) chan protocol.FileInfo {
 
 func (w *walker) walkAndHashFiles(ctx context.Context, fchan, dchan chan protocol.FileInfo) fs.WalkFunc {
 	now := time.Now()
+	var progressChan <-chan time.Time
+	if w.ProgressTickIntervalS > 0 {
+		progressChan = time.NewTicker(time.Duration(w.ProgressTickIntervalS) * time.Second).C
+	}
 	return func(path string, info fs.FileInfo, err error) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-progressChan:
+			l.Debugf("Walk %s %s currently walking %v", w.Folder, w.Subs, path)
+			events.Default.Log(events.FolderScanWalkProgress, map[string]interface{}{
+				"folder":  w.Folder,
+				"current": path,
+			})
 		default:
 		}
 

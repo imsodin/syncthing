@@ -156,6 +156,12 @@ func (s *verboseService) formatEvent(ev events.Event) string {
 		}
 		return fmt.Sprintf("Scanning folder %q, %d%% done (%.01f MiB/s)", folder, pct, rate)
 
+	case events.FolderScanWalkProgress:
+		data := ev.Data.(map[string]interface{})
+		folder := data["folder"].(string)
+		current := data["current"].(string)
+		return fmt.Sprintf("Scanning folder %q, walking file tree, currently %v", folder, current)
+
 	case events.DevicePaused:
 		data := ev.Data.(map[string]string)
 		device := data["device"]
