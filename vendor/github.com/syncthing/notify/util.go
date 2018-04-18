@@ -6,6 +6,7 @@ package notify
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,6 +49,7 @@ func nonil(err ...error) error {
 }
 
 func cleanpath(path string) (realpath string, isrec bool, err error) {
+	fmt.Println("[NOTIFYDEBUG] cleanpath: start:", path)
 	if strings.HasSuffix(path, "...") {
 		isrec = true
 		path = path[:len(path)-3]
@@ -55,6 +57,7 @@ func cleanpath(path string) (realpath string, isrec bool, err error) {
 	if path, err = filepath.Abs(path); err != nil {
 		return "", false, err
 	}
+	fmt.Println("[NOTIFYDEBUG] cleanpath: ...-removal and abs:", path)
 	if path, err = canonical(path); err != nil {
 		return "", false, err
 	}
@@ -69,6 +72,7 @@ func canonical(p string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	fmt.Println("[NOTIFYDEBUG] canonical: start:", p)
 	for i, j, depth := 1, 0, 1; i < len(p); i, depth = i+1, depth+1 {
 		if depth > 128 {
 			return "", &os.PathError{Op: "canonical", Path: p, Err: errDepth}
@@ -78,20 +82,26 @@ func canonical(p string) (string, error) {
 		} else {
 			j, i = i, i+j
 		}
+		fmt.Printf("[NOTIFYDEBUG] canonical (i=%v, j=%v, depth=%v, p=%v)", i, j, depth, p)
 		fi, err := os.Lstat(p[:i])
 		if err != nil {
+			fmt.Printf("[NOTIFYDEBUG] canonical: lstat err: %v", err)
 			return "", err
 		}
 		if fi.Mode()&os.ModeSymlink == os.ModeSymlink {
+			fmt.Printf("[NOTIFYDEBUG] canonical: symlink detected: %v", p[:i])
 			s, err := os.Readlink(p[:i])
 			if err != nil {
+				fmt.Printf("[NOTIFYDEBUG] canonical: os.Readlink failed: %v", err)
 				return "", err
 			}
+			fmt.Printf("[NOTIFYDEBUG] canonical: dereferenced link: %v", s)
 			if filepath.IsAbs(s) {
 				p = "/" + s + p[i:]
 			} else {
 				p = p[:j] + s + p[i:]
 			}
+			fmt.Printf("[NOTIFYDEBUG] canonical: new path: %v", p)
 			i = 1 // no guarantee s is canonical, start all over
 		}
 	}

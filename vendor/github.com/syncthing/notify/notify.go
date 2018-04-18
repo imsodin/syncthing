@@ -100,6 +100,7 @@ func WatchWithFilter(path string, c chan<- EventInfo,
 	if err := lazyInitDefaultTree(); err != nil {
 		return err
 	}
+	fmt.Printf("[NOTIFYDEBUG] WatchWithFilter: %v", path)
 	return defaultTree.Watch(path, c, doNotWatch, events...)
 }
 

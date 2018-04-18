@@ -4,7 +4,10 @@
 
 package notify
 
-import "sync"
+import (
+	"fmt"
+	"sync"
+)
 
 // nonrecursiveTree TODO(rjeczalik)
 type nonrecursiveTree struct {
@@ -154,14 +157,17 @@ func (t *nonrecursiveTree) Watch(path string, c chan<- EventInfo,
 	if len(events) == 0 {
 		return nil
 	}
+	fmt.Printf("[NOTIFYDEBUG] nonrecursiveTree.Watch: %v", path)
 	path, isrec, err := cleanpath(path)
 	if err != nil {
+		fmt.Printf("[NOTIFYDEBUG] nonrecursiveTree.Watch: failed cleaning path %v: %v", path, err)
 		return err
 	}
 	eset := joinevents(events)
 	t.rw.Lock()
 	defer t.rw.Unlock()
 	nd := t.root.Add(path)
+	fmt.Printf("[NOTIFYDEBUG] nonrecursiveTree.Watch (path=%v): isrec: %v", path, isrec)
 	if isrec {
 		return t.watchrec(nd, c, eset|recursive, doNotWatch)
 	}
