@@ -25,6 +25,14 @@ func errnotexist(name string) error {
 	}
 }
 
+func errtraverse(name string, err error) error {
+	return &os.PathError{
+		Op:   "error while traversing",
+		Path: name,
+		Err:  err,
+	}
+}
+
 type node struct {
 	Name  string
 	Watch watchpoint
@@ -70,17 +78,13 @@ Traverse:
 		case errSkip:
 			continue Traverse
 		default:
-			return &os.PathError{
-				Op:   "error while traversing",
-				Path: nd.Name,
-				Err:  err,
-			}
+			return errtraverse(nd.Name, err)
 		}
 		// TODO(rjeczalik): tolerate open failures - add failed names to
 		// AddDirError and notify users which names are not added to the tree.
 		fi, err := ioutil.ReadDir(nd.Name)
 		if err != nil {
-			return err
+			return errtraverse(nd.Name, err)
 		}
 		for _, fi := range fi {
 			if fi.Mode()&(os.ModeSymlink|os.ModeDir) == os.ModeDir {
@@ -151,7 +155,7 @@ Traverse:
 		case errSkip:
 			continue Traverse
 		default:
-			return err
+			return errtraverse(nd.Name, err)
 		}
 		for name, nd := range nd.Child {
 			if name == "" {
@@ -178,7 +182,7 @@ func (nd node) WalkPath(name string, fn walkPathFunc) error {
 		case errSkip:
 			return nil
 		default:
-			return err
+			return errtraverse(nd.Name, err)
 		}
 		if nd, ok = nd.Child[name[i:i+j]]; !ok {
 			return errnotexist(name[:i+j])
@@ -190,7 +194,7 @@ func (nd node) WalkPath(name string, fn walkPathFunc) error {
 	case errSkip:
 		return nil
 	default:
-		return err
+		return errtraverse(nd.Name, err)
 	}
 	if nd, ok = nd.Child[name[i:]]; !ok {
 		return errnotexist(name)
@@ -199,7 +203,7 @@ func (nd node) WalkPath(name string, fn walkPathFunc) error {
 	case nil, errSkip:
 		return nil
 	default:
-		return err
+		return errtraverse(nd.Name, err)
 	}
 }
 

@@ -82,26 +82,26 @@ func canonical(p string) (string, error) {
 		} else {
 			j, i = i, i+j
 		}
-		fmt.Printf("[NOTIFYDEBUG] canonical (i=%v, j=%v, depth=%v, p=%v)", i, j, depth, p)
+		fmt.Printf("[NOTIFYDEBUG] canonical (i=%v, j=%v, depth=%v, p=%v)\n", i, j, depth, p)
 		fi, err := os.Lstat(p[:i])
 		if err != nil {
-			fmt.Printf("[NOTIFYDEBUG] canonical: lstat err: %v", err)
+			fmt.Printf("[NOTIFYDEBUG] canonical: lstat err: %v\n", err)
 			return "", err
 		}
 		if fi.Mode()&os.ModeSymlink == os.ModeSymlink {
-			fmt.Printf("[NOTIFYDEBUG] canonical: symlink detected: %v", p[:i])
+			fmt.Printf("[NOTIFYDEBUG] canonical: symlink detected: %v\n", p[:i])
 			s, err := os.Readlink(p[:i])
 			if err != nil {
-				fmt.Printf("[NOTIFYDEBUG] canonical: os.Readlink failed: %v", err)
+				fmt.Printf("[NOTIFYDEBUG] canonical: os.Readlink failed: %v\n", err)
 				return "", err
 			}
-			fmt.Printf("[NOTIFYDEBUG] canonical: dereferenced link: %v", s)
+			fmt.Printf("[NOTIFYDEBUG] canonical: dereferenced link: %v\n", s)
 			if filepath.IsAbs(s) {
 				p = "/" + s + p[i:]
 			} else {
 				p = p[:j] + s + p[i:]
 			}
-			fmt.Printf("[NOTIFYDEBUG] canonical: new path: %v", p)
+			fmt.Printf("[NOTIFYDEBUG] canonical: new path: %v\n", p)
 			i = 1 // no guarantee s is canonical, start all over
 		}
 	}
