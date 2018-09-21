@@ -125,13 +125,18 @@ type Model interface {
 	// An index update was received from the peer device
 	IndexUpdate(deviceID DeviceID, folder string, files []FileInfo)
 	// A request was made by the peer device
-	Request(deviceID DeviceID, folder string, name string, offset int64, hash []byte, weakHash uint32, fromTemporary bool, buf []byte) error
+	Request(deviceID DeviceID, folder, name string, size int32, offset int64, hash []byte, weakHash uint32, fromTemporary bool) (RequestResult, error)
 	// A cluster configuration message was received
 	ClusterConfig(deviceID DeviceID, config ClusterConfig)
 	// The peer device closed the connection
 	Closed(conn Connection, err error)
 	// The peer device sent progress updates for the files it is currently downloading
 	DownloadProgress(deviceID DeviceID, folder string, updates []FileDownloadProgressUpdate)
+}
+
+type RequestResult interface {
+	Data() []byte
+	Done()
 }
 
 type Connection interface {
@@ -184,7 +189,7 @@ type message interface {
 
 type asyncMessage struct {
 	msg  message
-	done chan struct{} // done closes when we're done marshalling the message and its contents can be reused
+	done chan struct{} // done closes when we're done sending the message
 }
 
 const (
@@ -394,7 +399,6 @@ func (c *rawConnection) readerLoop() (err error) {
 			if err := checkFilename(msg.Name); err != nil {
 				return fmt.Errorf("protocol error: request: %q: %v", msg.Name, err)
 			}
-			// Requests are handled asynchronously
 			go c.handleRequest(*msg)
 
 		case *Response:
@@ -590,38 +594,15 @@ func checkFilename(name string) error {
 }
 
 func (c *rawConnection) handleRequest(req Request) {
-	size := int(req.Size)
-	usePool := size <= MaxBlockSize
-
-	var buf []byte
-	var done chan struct{}
-
-	if usePool {
-		buf = c.pool.get(size)
-		done = make(chan struct{})
-	} else {
-		buf = make([]byte, size)
-	}
-
-	err := c.receiver.Request(c.id, req.Folder, req.Name, req.Offset, req.Hash, req.WeakHash, req.FromTemporary, buf)
-	if err != nil {
-		c.send(&Response{
-			ID:   req.ID,
-			Data: nil,
-			Code: errorToCode(err),
-		}, done)
-	} else {
-		c.send(&Response{
-			ID:   req.ID,
-			Data: buf,
-			Code: errorToCode(err),
-		}, done)
-	}
-
-	if usePool {
-		<-done
-		c.pool.put(buf)
-	}
+	res, err := c.receiver.Request(c.id, req.Folder, req.Name, req.Size, req.Offset, req.Hash, req.WeakHash, req.FromTemporary)
+	done := make(chan struct{})
+	c.send(&Response{
+		ID:   req.ID,
+		Data: res.Data(),
+		Code: errorToCode(err),
+	}, done)
+	<-done
+	res.Done()
 }
 
 func (c *rawConnection) handleResponse(resp Response) {
@@ -639,6 +620,9 @@ func (c *rawConnection) send(msg message, done chan struct{}) bool {
 	case c.outbox <- asyncMessage{msg, done}:
 		return true
 	case <-c.closed:
+		if done != nil {
+			close(done)
+		}
 		return false
 	}
 }
@@ -647,7 +631,11 @@ func (c *rawConnection) writerLoop() {
 	for {
 		select {
 		case hm := <-c.outbox:
-			if err := c.writeMessage(hm); err != nil {
+			err := c.writeMessage(hm)
+			if hm.done != nil {
+				close(hm.done)
+			}
+			if err != nil {
 				c.close(err)
 				return
 			}
@@ -670,9 +658,6 @@ func (c *rawConnection) writeCompressedMessage(hm asyncMessage) error {
 	buf := buffers.get(size)
 	if _, err := hm.msg.MarshalTo(buf); err != nil {
 		return fmt.Errorf("marshalling message: %v", err)
-	}
-	if hm.done != nil {
-		close(hm.done)
 	}
 
 	compressed, err := c.lz4Compress(buf)
@@ -739,9 +724,6 @@ func (c *rawConnection) writeUncompressedMessage(hm asyncMessage) error {
 	// Message
 	if _, err := hm.msg.MarshalTo(buf[2+hdrSize+4:]); err != nil {
 		return fmt.Errorf("marshalling message: %v", err)
-	}
-	if hm.done != nil {
-		close(hm.done)
 	}
 
 	n, err := c.cw.Write(buf[:totSize])

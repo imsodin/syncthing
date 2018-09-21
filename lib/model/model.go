@@ -55,6 +55,10 @@ const (
 	maxBatchSizeFiles = 1000       // Either way, don't include more files than this
 )
 
+// maxRequestBytes is the maximal amount of bytes that may be requested by
+// remotes at the same time.
+var maxRequestBytes = 2 * protocol.MaxBlockSize
+
 type service interface {
 	BringToFront(string)
 	Override(*db.FileSet, func([]protocol.FileInfo))
@@ -91,6 +95,7 @@ type Model struct {
 	shortID           protocol.ShortID
 	cacheIgnoredFiles bool
 	protectedFiles    []string
+	blockPool         *protocol.BlockBufferPool
 
 	clientName    string
 	clientVersion string
@@ -107,6 +112,7 @@ type Model struct {
 
 	pmut                sync.RWMutex // protects the below
 	conn                map[protocol.DeviceID]connections.Connection
+	connRequestLimiters map[protocol.DeviceID]*byteSemaphore
 	closed              map[protocol.DeviceID]chan struct{}
 	helloMessages       map[protocol.DeviceID]protocol.HelloResult
 	deviceDownloads     map[protocol.DeviceID]*deviceDownloadState
@@ -150,6 +156,7 @@ func NewModel(cfg *config.Wrapper, id protocol.DeviceID, clientName, clientVersi
 		shortID:             id.Short(),
 		cacheIgnoredFiles:   cfg.Options().CacheIgnoredFiles,
 		protectedFiles:      protectedFiles,
+		blockPool:           protocol.NewBlockBufferPool(),
 		clientName:          clientName,
 		clientVersion:       clientVersion,
 		folderCfgs:          make(map[string]config.FolderConfiguration),
@@ -160,6 +167,7 @@ func NewModel(cfg *config.Wrapper, id protocol.DeviceID, clientName, clientVersi
 		folderRunnerTokens:  make(map[string][]suture.ServiceToken),
 		folderStatRefs:      make(map[string]*stats.FolderStatisticsReference),
 		conn:                make(map[protocol.DeviceID]connections.Connection),
+		connRequestLimiters: make(map[protocol.DeviceID]*byteSemaphore),
 		closed:              make(map[protocol.DeviceID]chan struct{}),
 		helloMessages:       make(map[protocol.DeviceID]protocol.HelloResult),
 		deviceDownloads:     make(map[protocol.DeviceID]*deviceDownloadState),
@@ -1283,6 +1291,7 @@ func (m *Model) Closed(conn protocol.Connection, err error) {
 		m.progressEmitter.temporaryIndexUnsubscribe(conn)
 	}
 	delete(m.conn, device)
+	delete(m.connRequestLimiters, device)
 	delete(m.helloMessages, device)
 	delete(m.deviceDownloads, device)
 	delete(m.remotePausedFolders, device)
@@ -1316,19 +1325,44 @@ func (m *Model) closeLocked(device protocol.DeviceID) {
 	closeRawConn(conn)
 }
 
+type RequestResult struct {
+	data        []byte
+	limiter     *byteSemaphore
+	pool        *protocol.BlockBufferPool
+	limiterSize int
+}
+
+func NewRequestResult(size int, limiter *byteSemaphore, pool *protocol.BlockBufferPool) *RequestResult {
+	limiterSize := int(size)
+	if limiterSize > maxRequestBytes {
+		// If the requested size exceeds the limit, adjust it down to
+		// the maximum,effectively allowing just one request.
+		limiterSize = maxRequestBytes
+	}
+	limiter.take(limiterSize)
+
+	return &RequestResult{
+		data:        pool.Get(size),
+		limiter:     limiter,
+		pool:        pool,
+		limiterSize: limiterSize,
+	}
+}
+
+func (r *RequestResult) Data() []byte {
+	return r.data
+}
+
+func (r *RequestResult) Done() {
+	r.pool.Put(r.data)
+	r.limiter.give(r.limiterSize)
+}
+
 // Request returns the specified data segment by reading it from local disk.
 // Implements the protocol.Model interface.
-func (m *Model) Request(deviceID protocol.DeviceID, folder, name string, offset int64, hash []byte, weakHash uint32, fromTemporary bool, buf []byte) error {
-	if offset < 0 {
-		return protocol.ErrInvalid
-	}
-
-	if cfg, ok := m.cfg.Folder(folder); !ok || !cfg.SharedWith(deviceID) {
-		l.Warnf("Request from %s for file %s in unshared folder %q", deviceID, name, folder)
-		return protocol.ErrNoSuchFile
-	} else if cfg.Paused {
-		l.Debugf("Request from %s for file %s in paused folder %q", deviceID, name, folder)
-		return protocol.ErrInvalid
+func (m *Model) Request(deviceID protocol.DeviceID, folder, name string, size int32, offset int64, hash []byte, weakHash uint32, fromTemporary bool) (protocol.RequestResult, error) {
+	if size < 0 || offset < 0 {
+		return nil, protocol.ErrInvalid
 	}
 
 	m.fmut.RLock()
@@ -1339,36 +1373,57 @@ func (m *Model) Request(deviceID protocol.DeviceID, folder, name string, offset 
 		// The folder might be already unpaused in the config, but not yet
 		// in the model.
 		l.Debugf("Request from %s for file %s in unstarted folder %q", deviceID, name, folder)
-		return protocol.ErrInvalid
+		return nil, protocol.ErrInvalid
+	}
+
+	if !folderCfg.SharedWith(deviceID) {
+		l.Warnf("Request from %s for file %s in unshared folder %q", deviceID, name, folder)
+		return nil, protocol.ErrNoSuchFile
+	}
+	if folderCfg.Paused {
+		l.Debugf("Request from %s for file %s in paused folder %q", deviceID, name, folder)
+		return nil, protocol.ErrInvalid
 	}
 
 	// Make sure the path is valid and in canonical form
 	var err error
 	if name, err = fs.Canonicalize(name); err != nil {
 		l.Debugf("Request from %s in folder %q for invalid filename %s", deviceID, folder, name)
-		return protocol.ErrInvalid
+		return nil, protocol.ErrInvalid
 	}
 
 	if deviceID != protocol.LocalDeviceID {
-		l.Debugf("%v REQ(in): %s: %q / %q o=%d s=%d t=%v", m, deviceID, folder, name, offset, len(buf), fromTemporary)
+		l.Debugf("%v REQ(in): %s: %q / %q o=%d s=%d t=%v", m, deviceID, folder, name, offset, size, fromTemporary)
+	}
+
+	if fs.IsInternal(name) {
+		l.Debugf("%v REQ(in) for internal file: %s: %q / %q o=%d s=%d", m, deviceID, folder, name, offset, size)
+		return nil, protocol.ErrNoSuchFile
+	}
+
+	if folderIgnores.Match(name).IsIgnored() {
+		l.Debugf("%v REQ(in) for ignored file: %s: %q / %q o=%d s=%d", m, deviceID, folder, name, offset, size)
+		return nil, protocol.ErrNoSuchFile
 	}
 
 	folderFs := folderCfg.Filesystem()
 
-	if fs.IsInternal(name) {
-		l.Debugf("%v REQ(in) for internal file: %s: %q / %q o=%d s=%d", m, deviceID, folder, name, offset, len(buf))
-		return protocol.ErrNoSuchFile
-	}
-
-	if folderIgnores.Match(name).IsIgnored() {
-		l.Debugf("%v REQ(in) for ignored file: %s: %q / %q o=%d s=%d", m, deviceID, folder, name, offset, len(buf))
-		return protocol.ErrNoSuchFile
-	}
-
 	if err := osutil.TraversesSymlink(folderFs, filepath.Dir(name)); err != nil {
-		l.Debugf("%v REQ(in) traversal check: %s - %s: %q / %q o=%d s=%d", m, err, deviceID, folder, name, offset, len(buf))
-		return protocol.ErrNoSuchFile
+		l.Debugf("%v REQ(in) traversal check: %s - %s: %q / %q o=%d s=%d", m, err, deviceID, folder, name, offset, size)
+		return nil, protocol.ErrNoSuchFile
 	}
+
+	// Restrict parallel requests by connection/device
+
+	m.pmut.RLock()
+	limiter, ok := m.connRequestLimiters[deviceID]
+	m.pmut.RUnlock()
+	if !ok {
+		l.Debugf("Missing limiter (connection) for request from %s for file %s in folder %q", deviceID, name, folder)
+		return nil, protocol.ErrInvalid
+	}
+
+	res := NewRequestResult(int(size), limiter, m.blockPool)
 
 	// Only check temp files if the flag is set, and if we are set to advertise
 	// the temp indexes.
@@ -1378,11 +1433,11 @@ func (m *Model) Request(deviceID protocol.DeviceID, folder, name string, offset 
 		if info, err := folderFs.Lstat(tempFn); err != nil || !info.IsRegular() {
 			// Reject reads for anything that doesn't exist or is something
 			// other than a regular file.
-			return protocol.ErrNoSuchFile
+			return res, protocol.ErrNoSuchFile
 		}
-		err := readOffsetIntoBuf(folderFs, tempFn, offset, buf)
-		if err == nil && scanner.Validate(buf, hash, weakHash) {
-			return nil
+		err := readOffsetIntoBuf(folderFs, tempFn, offset, res.data)
+		if err == nil && scanner.Validate(res.data, hash, weakHash) {
+			return res, nil
 		}
 		// Fall through to reading from a non-temp file, just incase the temp
 		// file has finished downloading.
@@ -1391,21 +1446,21 @@ func (m *Model) Request(deviceID protocol.DeviceID, folder, name string, offset 
 	if info, err := folderFs.Lstat(name); err != nil || !info.IsRegular() {
 		// Reject reads for anything that doesn't exist or is something
 		// other than a regular file.
-		return protocol.ErrNoSuchFile
+		return res, protocol.ErrNoSuchFile
 	}
 
-	if err = readOffsetIntoBuf(folderFs, name, offset, buf); fs.IsNotExist(err) {
-		return protocol.ErrNoSuchFile
+	if err := readOffsetIntoBuf(folderFs, name, offset, res.data); fs.IsNotExist(err) {
+		return res, protocol.ErrNoSuchFile
 	} else if err != nil {
-		return protocol.ErrGeneric
+		return res, protocol.ErrGeneric
 	}
 
-	if !scanner.Validate(buf, hash, weakHash) {
-		m.recheckFile(deviceID, folderFs, folder, name, int(offset)/len(buf), hash)
-		return protocol.ErrNoSuchFile
+	if !scanner.Validate(res.data, hash, weakHash) {
+		m.recheckFile(deviceID, folderFs, folder, name, int(offset)/int(size), hash)
+		return res, protocol.ErrNoSuchFile
 	}
 
-	return nil
+	return res, nil
 }
 
 func (m *Model) recheckFile(deviceID protocol.DeviceID, folderFs fs.Filesystem, folder, name string, blockIndex int, hash []byte) {
@@ -1617,6 +1672,7 @@ func (m *Model) AddConnection(conn connections.Connection, hello protocol.HelloR
 	}
 
 	m.conn[deviceID] = conn
+	m.connRequestLimiters[deviceID] = newByteSemaphore(maxRequestBytes)
 	m.closed[deviceID] = make(chan struct{})
 	m.deviceDownloads[deviceID] = newDeviceDownloadState()
 

@@ -176,6 +176,9 @@ func TestRequest(t *testing.T) {
 	db := db.OpenMemory()
 
 	m := NewModel(defaultCfgWrapper, protocol.LocalDeviceID, "syncthing", "dev", db, nil)
+	m.fmut.Lock()
+	m.connRequestLimiters[device1] = newByteSemaphore(maxRequestBytes)
+	m.fmut.Unlock()
 
 	// device1 shares default, but device2 doesn't
 	m.AddFolder(defaultFolderConfig)
@@ -184,45 +187,42 @@ func TestRequest(t *testing.T) {
 	defer m.Stop()
 	m.ScanFolder("default")
 
-	bs := make([]byte, protocol.MinBlockSize)
-
 	// Existing, shared file
-	bs = bs[:6]
-	err := m.Request(device1, "default", "foo", 0, nil, 0, false, bs)
+	res, err := m.Request(device1, "default", "foo", 6, 0, nil, 0, false)
 	if err != nil {
 		t.Error(err)
 	}
+	bs := res.Data()
 	if !bytes.Equal(bs, []byte("foobar")) {
 		t.Errorf("Incorrect data from request: %q", string(bs))
 	}
 
 	// Existing, nonshared file
-	err = m.Request(device2, "default", "foo", 0, nil, 0, false, bs)
+	_, err = m.Request(device2, "default", "foo", 6, 0, nil, 0, false)
 	if err == nil {
 		t.Error("Unexpected nil error on insecure file read")
 	}
 
 	// Nonexistent file
-	err = m.Request(device1, "default", "nonexistent", 0, nil, 0, false, bs)
+	_, err = m.Request(device1, "default", "nonexistent", 6, 0, nil, 0, false)
 	if err == nil {
 		t.Error("Unexpected nil error on insecure file read")
 	}
 
 	// Shared folder, but disallowed file name
-	err = m.Request(device1, "default", "../walk.go", 0, nil, 0, false, bs)
+	_, err = m.Request(device1, "default", "../walk.go", 6, 0, nil, 0, false)
 	if err == nil {
 		t.Error("Unexpected nil error on insecure file read")
 	}
 
 	// Negative offset
-	err = m.Request(device1, "default", "foo", -4, nil, 0, false, bs[:0])
+	_, err = m.Request(device1, "default", "foo", -4, 0, nil, 0, false)
 	if err == nil {
 		t.Error("Unexpected nil error on insecure file read")
 	}
 
 	// Larger block than available
-	bs = bs[:42]
-	err = m.Request(device1, "default", "foo", 0, nil, 0, false, bs)
+	_, err = m.Request(device1, "default", "foo", 42, 0, nil, 0, false)
 	if err == nil {
 		t.Error("Unexpected nil error on insecure file read")
 	}
@@ -522,6 +522,9 @@ func BenchmarkRequestOut(b *testing.B) {
 func BenchmarkRequestInSingleFile(b *testing.B) {
 	db := db.OpenMemory()
 	m := NewModel(defaultCfgWrapper, protocol.LocalDeviceID, "syncthing", "dev", db, nil)
+	m.fmut.Lock()
+	m.connRequestLimiters[device1] = newByteSemaphore(maxRequestBytes)
+	m.fmut.Unlock()
 	m.AddFolder(defaultFolderConfig)
 	m.ServeBackground()
 	defer m.Stop()
@@ -537,7 +540,7 @@ func BenchmarkRequestInSingleFile(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		if err := m.Request(device1, "default", "request/for/a/file/in/a/couple/of/dirs/128k", 0, nil, 0, false, buf); err != nil {
+		if _, err := m.Request(device1, "default", "request/for/a/file/in/a/couple/of/dirs/128k", 128<<10, 0, nil, 0, false); err != nil {
 			b.Error(err)
 		}
 	}
