@@ -483,7 +483,7 @@ func TestDeregisterOnFailInCopy(t *testing.T) {
 	case state := <-finisherBufferChan:
 		// At this point the file should still be registered with both the job
 		// queue, and the progress emitter. Verify this.
-		if f.model.progressEmitter.lenRegistry() != 1 || f.queue.lenProgress() != 1 || f.queue.lenQueued() != 0 {
+		if f.model.progressEmitter.lenRegistry() != 1 || f.queue.lenProgress() != 1 || f.queue.LenQueued() != 0 {
 			t.Fatal("Could not find file")
 		}
 
@@ -504,16 +504,16 @@ func TestDeregisterOnFailInCopy(t *testing.T) {
 			t.Fatal("File not closed?")
 		}
 
-		if f.model.progressEmitter.lenRegistry() != 0 || f.queue.lenProgress() != 0 || f.queue.lenQueued() != 0 {
-			t.Fatal("Still registered", f.model.progressEmitter.lenRegistry(), f.queue.lenProgress(), f.queue.lenQueued())
+		if f.model.progressEmitter.lenRegistry() != 0 || f.queue.lenProgress() != 0 || f.queue.LenQueued() != 0 {
+			t.Fatal("Still registered", f.model.progressEmitter.lenRegistry(), f.queue.lenProgress(), f.queue.LenQueued())
 		}
 
 		// Doing it again should have no effect
 		finisherChan <- state
 		time.Sleep(100 * time.Millisecond)
 
-		if f.model.progressEmitter.lenRegistry() != 0 || f.queue.lenProgress() != 0 || f.queue.lenQueued() != 0 {
-			t.Fatal("Still registered", f.model.progressEmitter.lenRegistry(), f.queue.lenProgress(), f.queue.lenQueued())
+		if f.model.progressEmitter.lenRegistry() != 0 || f.queue.lenProgress() != 0 || f.queue.LenQueued() != 0 {
+			t.Fatal("Still registered", f.model.progressEmitter.lenRegistry(), f.queue.lenProgress(), f.queue.LenQueued())
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Didn't get anything to the finisher")
@@ -558,7 +558,7 @@ func TestDeregisterOnFailInPull(t *testing.T) {
 	case state := <-finisherBufferChan:
 		// At this point the file should still be registered with both the job
 		// queue, and the progress emitter. Verify this.
-		if f.model.progressEmitter.lenRegistry() != 1 || f.queue.lenProgress() != 1 || f.queue.lenQueued() != 0 {
+		if f.model.progressEmitter.lenRegistry() != 1 || f.queue.lenProgress() != 1 || f.queue.LenQueued() != 0 {
 			t.Fatal("Could not find file")
 		}
 
@@ -579,16 +579,16 @@ func TestDeregisterOnFailInPull(t *testing.T) {
 			t.Fatal("File not closed?")
 		}
 
-		if f.model.progressEmitter.lenRegistry() != 0 || f.queue.lenProgress() != 0 || f.queue.lenQueued() != 0 {
-			t.Fatal("Still registered", f.model.progressEmitter.lenRegistry(), f.queue.lenProgress(), f.queue.lenQueued())
+		if f.model.progressEmitter.lenRegistry() != 0 || f.queue.lenProgress() != 0 || f.queue.LenQueued() != 0 {
+			t.Fatal("Still registered", f.model.progressEmitter.lenRegistry(), f.queue.lenProgress(), f.queue.LenQueued())
 		}
 
 		// Doing it again should have no effect
 		finisherChan <- state
 		time.Sleep(100 * time.Millisecond)
 
-		if f.model.progressEmitter.lenRegistry() != 0 || f.queue.lenProgress() != 0 || f.queue.lenQueued() != 0 {
-			t.Fatal("Still registered", f.model.progressEmitter.lenRegistry(), f.queue.lenProgress(), f.queue.lenQueued())
+		if f.model.progressEmitter.lenRegistry() != 0 || f.queue.lenProgress() != 0 || f.queue.LenQueued() != 0 {
+			t.Fatal("Still registered", f.model.progressEmitter.lenRegistry(), f.queue.lenProgress(), f.queue.LenQueued())
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Didn't get anything to the finisher")

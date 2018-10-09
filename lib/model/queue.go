@@ -110,7 +110,7 @@ func (q *jobQueue) Shuffle() {
 	}
 }
 
-func (q *jobQueue) lenQueued() int {
+func (q *jobQueue) LenQueued() int {
 	q.mut.Lock()
 	defer q.mut.Unlock()
 	return len(q.queued)
