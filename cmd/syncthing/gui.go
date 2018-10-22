@@ -1227,8 +1227,10 @@ func (s *apiService) postDBIgnores(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *apiService) getIndexEvents(w http.ResponseWriter, r *http.Request) {
-	s.fss.gotEventRequest()
 	mask := s.getEventMask(r.URL.Query().Get("events"))
+	if mask&events.FolderSummary == events.FolderSummary {
+		s.fss.gotFolderSummaryEventRequest()
+	}
 	sub := s.getEventSub(mask)
 	s.getEvents(w, r, sub)
 }

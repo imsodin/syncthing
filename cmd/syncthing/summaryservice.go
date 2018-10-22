@@ -217,7 +217,7 @@ func (c *folderSummaryService) sendSummary(folder string) {
 	}
 }
 
-func (c *folderSummaryService) gotEventRequest() {
+func (c *folderSummaryService) gotFolderSummaryEventRequest() {
 	c.lastEventReqMut.Lock()
 	c.lastEventReq = time.Now()
 	c.lastEventReqMut.Unlock()
