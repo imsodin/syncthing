@@ -22,10 +22,12 @@ import (
 
 func TestIgnore(t *testing.T) {
 	pats := New(fs.NewFilesystem(fs.FilesystemTypeBasic, "testdata"), WithCache(true))
+	fmt.Println("test0")
 	err := pats.Load(".stignore")
 	if err != nil {
 		t.Fatal(err)
 	}
+	fmt.Println("test1")
 
 	var tests = []struct {
 		f string
@@ -721,14 +723,14 @@ func TestIssue3164(t *testing.T) {
 		"(?d)(?i)**/*.part/**",
 		"(?d)(?i)/foo",
 		"(?d)(?i)/foo/**",
-		"(?d)(?i)**/bar",
 		"(?d)(?i)bar",
-		"(?d)(?i)**/bar/**",
+		"(?d)(?i)**/bar",
 		"(?d)(?i)bar/**",
+		"(?d)(?i)**/bar/**",
 	}
 
 	if len(expanded) != len(expected) {
-		t.Errorf("Unmatched count: %d != %d", len(expanded), len(expected))
+		t.Fatalf("Unmatched count: %d != %d", len(expanded), len(expected))
 	}
 
 	for i := range expanded {
@@ -1051,5 +1053,136 @@ func TestIssue5009(t *testing.T) {
 
 	if pats.skipIgnoredDirs {
 		t.Error("skipIgnoredDirs should not be true with includes")
+	}
+}
+
+func TestDoubleAsteriskAtEnd(t *testing.T) {
+	pats := New(fs.NewFilesystem(fs.FilesystemTypeBasic, "."), WithCache(true))
+
+	stignore := `
+	/foo**
+	/bar/**
+	`
+
+	if err := pats.Parse(bytes.NewBufferString(stignore), ".stignore"); err != nil {
+		t.Fatal(err)
+	}
+
+	expanded := pats.Patterns()
+	t.Log(expanded)
+
+	expected := []string{
+		"/foo**",
+		"/bar/**",
+	}
+
+	if len(expanded) != len(expected) {
+		t.Fatalf("Unmatched count: %d != %d", len(expanded), len(expected))
+	}
+
+	for i := range expanded {
+		if expanded[i] != expected[i] {
+			t.Errorf("Pattern %d does not match: %s != %s", i, expanded[i], expected[i])
+		}
+	}
+}
+
+func TestSkipAnchoredIncludes(t *testing.T) {
+	pats := New(fs.NewFilesystem(fs.FilesystemTypeBasic, "."), WithCache(true))
+
+	stignore := `
+	!/iex2
+	!/ign1/ex**
+	ign1
+	i*2
+	!/ign2
+	`
+
+	if err := pats.Parse(bytes.NewBufferString(stignore), ".stignore"); err != nil {
+		t.Fatal(err)
+	}
+
+	if !pats.skipIgnoredDirs {
+		t.Error("skipIgnoredDirs should be true with anchored includes")
+	}
+
+	stignore = `
+	!/iex2
+	!ign1/ex
+	ign1
+	i*2
+	!/ign2
+	`
+
+	if err := pats.Parse(bytes.NewBufferString(stignore), ".stignore"); err != nil {
+		t.Fatal(err)
+	}
+
+	if pats.skipIgnoredDirs {
+		t.Error("skipIgnoredDirs should not be true with unanchored includes")
+	}
+
+	stignore = `
+	!/iex2
+	!/ign1/*/ex
+	ign1
+	i*2
+	!/ign2
+	`
+
+	if err := pats.Parse(bytes.NewBufferString(stignore), ".stignore"); err != nil {
+		t.Fatal(err)
+	}
+
+	if pats.skipIgnoredDirs {
+		t.Error("skipIgnoredDirs should not be true with anchored includes that contain wildcards in the middle")
+	}
+
+	stignore = `
+	!/iex2
+	!/ign1/?/ex
+	ign1
+	i*2
+	!/ign2
+	`
+
+	if err := pats.Parse(bytes.NewBufferString(stignore), ".stignore"); err != nil {
+		t.Fatal(err)
+	}
+
+	if pats.skipIgnoredDirs {
+		t.Error("skipIgnoredDirs should not be true with anchored includes that contain wildcards in the middle")
+	}
+
+	stignore = `
+	!/iex2
+	!/ign1/[a-e]/ex
+	ign1
+	i*2
+	!/ign2
+	`
+
+	if err := pats.Parse(bytes.NewBufferString(stignore), ".stignore"); err != nil {
+		t.Fatal(err)
+	}
+
+	if pats.skipIgnoredDirs {
+		t.Error("skipIgnoredDirs should not be true with anchored includes that contain wildcards in the middle")
+	}
+
+	stignore = `
+	!/iex2
+	!/ign1/{foo,bar}/ex
+	ign1
+	i*2
+	!/ign2
+	`
+
+	if err := pats.Parse(bytes.NewBufferString(stignore), ".stignore"); err != nil {
+		t.Fatal(err)
+	}
+
+	if pats.skipIgnoredDirs {
+		t.Error("skipIgnoredDirs should not be true with anchored includes that contain wildcards in the middle")
 	}
 }
