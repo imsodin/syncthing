@@ -31,7 +31,7 @@ func TestRequestSimple(t *testing.T) {
 	// Verify that the model performs a request and creates a file based on
 	// an incoming index update.
 
-	m, fc, tmpDir, w := setupModelWithConnection()
+	m, fc, tmpDir, w := setupModelWithConnectionDefaultTmp()
 	defer func() {
 		m.Stop()
 		testOs.RemoveAll(tmpDir)
@@ -74,7 +74,7 @@ func TestSymlinkTraversalRead(t *testing.T) {
 		return
 	}
 
-	m, fc, tmpDir, w := setupModelWithConnection()
+	m, fc, tmpDir, w := setupModelWithConnectionDefaultTmp()
 	defer func() {
 		m.Stop()
 		testOs.RemoveAll(tmpDir)
@@ -118,7 +118,7 @@ func TestSymlinkTraversalWrite(t *testing.T) {
 		return
 	}
 
-	m, fc, tmpDir, w := setupModelWithConnection()
+	m, fc, tmpDir, w := setupModelWithConnectionDefaultTmp()
 	defer func() {
 		m.Stop()
 		testOs.RemoveAll(tmpDir)
@@ -183,7 +183,7 @@ func TestRequestCreateTmpSymlink(t *testing.T) {
 
 	// Test that an update for a temporary file is invalidated
 
-	m, fc, tmpDir, w := setupModelWithConnection()
+	m, fc, tmpDir, w := setupModelWithConnectionDefaultTmp()
 	defer func() {
 		m.Stop()
 		testOs.RemoveAll(tmpDir)
@@ -230,33 +230,20 @@ func TestRequestVersioningSymlinkAttack(t *testing.T) {
 	// Sets up a folder with trashcan versioning and tries to use a
 	// deleted symlink to escape
 
-	tmpDir := createTmpDir()
-	defer testOs.RemoveAll(tmpDir)
+	w, tmpDir := tmpDefaultWrapper()
+	defer func() {
+		testOs.RemoveAll(tmpDir)
+		testOs.Remove(w.ConfigPath())
+	}()
 
-	cfg := defaultCfgWrapper.RawCopy()
-	cfg.Devices = append(cfg.Devices, config.NewDeviceConfiguration(device2, "device2"))
-	cfg.Folders[0] = config.NewFolderConfiguration(protocol.LocalDeviceID, "default", "default", fs.FilesystemTypeBasic, tmpDir)
-	cfg.Folders[0].Devices = []config.FolderDeviceConfiguration{
-		{DeviceID: device1},
-		{DeviceID: device2},
-	}
-	cfg.Folders[0].Versioning = config.VersioningConfiguration{
-		Type: "trashcan",
-	}
-	w := createTmpWrapper(cfg)
-	defer testOs.Remove(w.ConfigPath())
+	fcfg := w.FolderList()[0]
+	fcfg.Versioning = config.VersioningConfiguration{Type: "trashcan"}
+	w.SetFolder(fcfg)
 
-	db := db.OpenMemory()
-	m := NewModel(w, device1, "syncthing", "dev", db, nil)
-	m.AddFolder(cfg.Folders[0])
-	m.ServeBackground()
-	m.StartFolder("default")
+	m, fcs := setupModelWithConnection(w)
 	defer m.Stop()
 
-	defer testOs.RemoveAll(tmpDir)
-
-	fc := addFakeConn(m, device2)
-	fc.folder = "default"
+	fc := fcs[0]
 
 	// Create a temporary directory that we will use as target to see if
 	// we can escape to it
@@ -323,14 +310,15 @@ func pullInvalidIgnored(t *testing.T, ft config.FolderType) {
 
 	tmpDir := createTmpDir()
 	cfg := defaultCfgWrapper.RawCopy()
-	cfg.Devices = append(cfg.Devices, config.NewDeviceConfiguration(device2, "device2"))
 	cfg.Folders[0] = config.NewFolderConfiguration(protocol.LocalDeviceID, "default", "default", fs.FilesystemTypeBasic, tmpDir)
 	cfg.Folders[0].Devices = []config.FolderDeviceConfiguration{
+		{DeviceID: myID},
 		{DeviceID: device1},
-		{DeviceID: device2},
 	}
 	cfg.Folders[0].Type = ft
-	m, fc, w := setupModelWithConnectionManual(cfg)
+	w := createTmpWrapper(cfg)
+	m, fcs := setupModelWithConnection(w)
+	fc := fcs[0]
 	defer func() {
 		m.Stop()
 		testOs.RemoveAll(tmpDir)
@@ -413,7 +401,7 @@ func pullInvalidIgnored(t *testing.T, ft config.FolderType) {
 			}
 			// The unignored files should only have a local version,
 			// to mark them as in conflict with any other existing versions.
-			ev := protocol.Vector{}.Update(device1.Short())
+			ev := protocol.Vector{}.Update(myID.Short())
 			if v := f.Version; !v.Equal(ev) {
 				t.Errorf("File %v has version %v, expected %v", f.Name, v, ev)
 			}
@@ -454,7 +442,7 @@ func pullInvalidIgnored(t *testing.T, ft config.FolderType) {
 func TestIssue4841(t *testing.T) {
 	testOs := &fatalOs{t}
 
-	m, fc, tmpDir, w := setupModelWithConnection()
+	m, fc, tmpDir, w := setupModelWithConnectionDefaultTmp()
 	defer func() {
 		m.Stop()
 		testOs.RemoveAll(tmpDir)
@@ -480,7 +468,7 @@ func TestIssue4841(t *testing.T) {
 		Name:       "foo",
 		Type:       protocol.FileInfoTypeFile,
 		LocalFlags: protocol.FlagLocalIgnored,
-		Version:    protocol.Vector{}.Update(device2.Short()),
+		Version:    protocol.Vector{}.Update(device1.Short()),
 	}})
 	<-received
 
@@ -490,7 +478,7 @@ func TestIssue4841(t *testing.T) {
 	}
 
 	f := <-received
-	if expected := (protocol.Vector{}.Update(device1.Short())); !f.Version.Equal(expected) {
+	if expected := (protocol.Vector{}.Update(myID.Short())); !f.Version.Equal(expected) {
 		t.Errorf("Got Version == %v, expected %v", f.Version, expected)
 	}
 }
@@ -498,7 +486,7 @@ func TestIssue4841(t *testing.T) {
 func TestRescanIfHaveInvalidContent(t *testing.T) {
 	testOs := &fatalOs{t}
 
-	m, fc, tmpDir, w := setupModelWithConnection()
+	m, fc, tmpDir, w := setupModelWithConnectionDefaultTmp()
 	defer func() {
 		m.Stop()
 		testOs.RemoveAll(tmpDir)
@@ -535,7 +523,7 @@ func TestRescanIfHaveInvalidContent(t *testing.T) {
 		t.Fatalf("unexpected weak hash: %d != 103547413", f.Blocks[0].WeakHash)
 	}
 
-	res, err := m.Request(device2, "default", "foo", int32(len(payload)), 0, f.Blocks[0].Hash, f.Blocks[0].WeakHash, false)
+	res, err := m.Request(device1, "default", "foo", int32(len(payload)), 0, f.Blocks[0].Hash, f.Blocks[0].WeakHash, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -551,7 +539,7 @@ func TestRescanIfHaveInvalidContent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err = m.Request(device2, "default", "foo", int32(len(payload)), 0, f.Blocks[0].Hash, f.Blocks[0].WeakHash, false)
+	res, err = m.Request(device1, "default", "foo", int32(len(payload)), 0, f.Blocks[0].Hash, f.Blocks[0].WeakHash, false)
 	if err == nil {
 		t.Fatalf("expected failure")
 	}
@@ -569,7 +557,7 @@ func TestRescanIfHaveInvalidContent(t *testing.T) {
 func TestParentDeletion(t *testing.T) {
 	testOs := &fatalOs{t}
 
-	m, fc, tmpDir, w := setupModelWithConnection()
+	m, fc, tmpDir, w := setupModelWithConnectionDefaultTmp()
 	defer func() {
 		m.Stop()
 		testOs.RemoveAll(tmpDir)
@@ -657,7 +645,7 @@ func TestRequestSymlinkWindows(t *testing.T) {
 
 	testOs := &fatalOs{t}
 
-	m, fc, tmpDir, w := setupModelWithConnection()
+	m, fc, tmpDir, w := setupModelWithConnectionDefaultTmp()
 	defer func() {
 		m.Stop()
 		testOs.RemoveAll(tmpDir)
@@ -713,39 +701,73 @@ func TestRequestSymlinkWindows(t *testing.T) {
 	}
 }
 
-func setupModelWithConnection() (*Model, *fakeConnection, string, *config.Wrapper) {
+func testFolderConfigTmp() (config.FolderConfiguration, string) {
 	tmpDir := createTmpDir()
-	cfg := defaultCfgWrapper.RawCopy()
-	cfg.Devices = append(cfg.Devices, config.NewDeviceConfiguration(device2, "device2"))
-	cfg.Folders[0] = config.NewFolderConfiguration(protocol.LocalDeviceID, "default", "default", fs.FilesystemTypeBasic, tmpDir)
-	cfg.Folders[0].FSWatcherEnabled = false
-	cfg.Folders[0].Devices = []config.FolderDeviceConfiguration{
-		{DeviceID: device1},
-		{DeviceID: device2},
-	}
-	m, fc, w := setupModelWithConnectionManual(cfg)
-	return m, fc, tmpDir, w
+	return testFolderConfig(tmpDir), tmpDir
 }
 
-func setupModelWithConnectionManual(cfg config.Configuration) (*Model, *fakeConnection, *config.Wrapper) {
-	w := createTmpWrapper(cfg)
+func testFolderConfig(path string) config.FolderConfiguration {
+	cfg := config.NewFolderConfiguration(myID, "default", "default", fs.FilesystemTypeBasic, path)
+	cfg.FSWatcherEnabled = false
+	cfg.Devices = append(cfg.Devices, config.FolderDeviceConfiguration{DeviceID: device1})
+	return cfg
+}
 
+func tmpDefaultWrapper() (*config.Wrapper, string) {
+	cfg := defaultCfgWrapper.RawCopy()
+	fcfg, tmpDir := testFolderConfigTmp()
+	cfg.Folders = []config.FolderConfiguration{fcfg}
+	return createTmpWrapper(cfg), tmpDir
+}
+
+func setupModelWithConnectionDefaultTmp() (*Model, *fakeConnection, string, *config.Wrapper) {
+	w, tmpDir := tmpDefaultWrapper()
+	m, fcs := setupModelWithConnection(w)
+	return m, fcs[0], tmpDir, w
+}
+
+func setupModelWithConnection(w *config.Wrapper) (*Model, []*fakeConnection) {
+	m := setupModel(w)
+
+	devs := w.Devices()
+	fcs := make([]*fakeConnection, 0, len(devs)-1)
+	for devID := range devs {
+		if devID != myID {
+			fc := addFakeConn(m, devID)
+			fc.folder = "default"
+			fcs = append(fcs, fc)
+		}
+	}
+
+	m.ScanFolders()
+
+	return m, fcs
+}
+
+func setupModelTmpDefault() (*Model, string, *config.Wrapper) {
+	w, tmpDir := tmpDefaultWrapper()
+	m := setupModel(w)
+	return m, tmpDir, w
+}
+
+func setupModel(w *config.Wrapper) *Model {
 	db := db.OpenMemory()
-	m := NewModel(w, device1, "syncthing", "dev", db, nil)
-	m.AddFolder(cfg.Folders[0])
+	m := NewModel(w, myID, "syncthing", "dev", db, nil)
 	m.ServeBackground()
-	m.StartFolder("default")
+	for id, cfg := range w.Folders() {
+		if !cfg.Paused {
+			m.AddFolder(cfg)
+			m.StartFolder(id)
+		}
+	}
 
-	fc := addFakeConn(m, device2)
-	fc.folder = "default"
+	m.ScanFolders()
 
-	m.ScanFolder("default")
-
-	return m, fc, w
+	return m
 }
 
 func createTmpDir() string {
-	tmpDir, err := ioutil.TempDir("", "_request-")
+	tmpDir, err := ioutil.TempDir("", "syncthing_testFolder-")
 	if err != nil {
 		panic("Failed to create temporary testing dir")
 	}
@@ -764,7 +786,7 @@ func equalContents(path string, contents []byte) error {
 func TestRequestRemoteRenameChanged(t *testing.T) {
 	testOs := &fatalOs{t}
 
-	m, fc, tmpDir, w := setupModelWithConnection()
+	m, fc, tmpDir, w := setupModelWithConnectionDefaultTmp()
 	defer func() {
 		m.Stop()
 		testOs.RemoveAll(tmpDir)
@@ -848,7 +870,7 @@ func TestRequestRemoteRenameChanged(t *testing.T) {
 func TestRequestRemoteRenameConflict(t *testing.T) {
 	testOs := &fatalOs{t}
 
-	m, fc, tmpDir, w := setupModelWithConnection()
+	m, fc, tmpDir, w := setupModelWithConnectionDefaultTmp()
 	defer func() {
 		m.Stop()
 		testOs.RemoveAll(tmpDir)
@@ -946,7 +968,7 @@ func TestRequestRemoteRenameConflict(t *testing.T) {
 func TestRequestDeleteChanged(t *testing.T) {
 	testOs := &fatalOs{t}
 
-	m, fc, tmpDir, w := setupModelWithConnection()
+	m, fc, tmpDir, w := setupModelWithConnectionDefaultTmp()
 	defer func() {
 		m.Stop()
 		testOs.RemoveAll(tmpDir)

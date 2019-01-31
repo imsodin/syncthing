@@ -18,15 +18,14 @@ func TestReadOnlyDir(t *testing.T) {
 	testOs := &fatalOs{t}
 
 	// Create a read only directory, clean it up afterwards.
-	testOs.Mkdir("testdata/read_only_dir", 0555)
-	defer func() {
-		testOs.Chmod("testdata/read_only_dir", 0755)
-		testOs.RemoveAll("testdata/read_only_dir")
-	}()
+	tmpDir := createTmpDir()
+	defer testOs.RemoveAll(tmpDir)
+	testOs.Chmod(tmpDir, 0555)
+	defer testOs.Chmod(tmpDir, 0755)
 
 	s := sharedPullerState{
-		fs:       fs.NewFilesystem(fs.FilesystemTypeBasic, "testdata"),
-		tempName: "read_only_dir/.temp_name",
+		fs:       fs.NewFilesystem(fs.FilesystemTypeBasic, tmpDir),
+		tempName: ".temp_name",
 		mut:      sync.NewRWMutex(),
 	}
 

@@ -2150,10 +2150,35 @@ func (m *Model) numHashers(folder string) int {
 // generateClusterConfig returns a ClusterConfigMessage that is correct for
 // the given peer device
 func (m *Model) generateClusterConfig(device protocol.DeviceID) protocol.ClusterConfig {
-	var message protocol.ClusterConfig
-
 	m.fmut.RLock()
 	defer m.fmut.RUnlock()
+
+	message := m.generateClusterConfigWithoutSeqs(device)
+
+	for i, folder := range message.Folders {
+		if folder.Paused {
+			continue
+		}
+
+		fs := m.folderFiles[folder.ID]
+
+		for j := range folder.Devices {
+			id := folder.Devices[j].ID
+			if id == m.id {
+				message.Folders[i].Devices[j].IndexID = fs.IndexID(protocol.LocalDeviceID)
+				message.Folders[i].Devices[j].MaxSequence = fs.Sequence(protocol.LocalDeviceID)
+			} else {
+				message.Folders[i].Devices[j].IndexID = fs.IndexID(id)
+				message.Folders[i].Devices[j].MaxSequence = fs.Sequence(id)
+			}
+		}
+	}
+
+	return message
+}
+
+func (m *Model) generateClusterConfigWithoutSeqs(device protocol.DeviceID) protocol.ClusterConfig {
+	var message protocol.ClusterConfig
 
 	for _, folderCfg := range m.cfg.FolderList() {
 		if !folderCfg.SharedWith(device) {
@@ -2170,11 +2195,6 @@ func (m *Model) generateClusterConfig(device protocol.DeviceID) protocol.Cluster
 			Paused:             folderCfg.Paused,
 		}
 
-		var fs *db.FileSet
-		if !folderCfg.Paused {
-			fs = m.folderFiles[folderCfg.ID]
-		}
-
 		for _, device := range folderCfg.Devices {
 			deviceCfg, _ := m.cfg.Device(device.DeviceID)
 
@@ -2185,16 +2205,6 @@ func (m *Model) generateClusterConfig(device protocol.DeviceID) protocol.Cluster
 				Compression: deviceCfg.Compression,
 				CertName:    deviceCfg.CertName,
 				Introducer:  deviceCfg.Introducer,
-			}
-
-			if fs != nil {
-				if deviceCfg.DeviceID == m.id {
-					protocolDevice.IndexID = fs.IndexID(protocol.LocalDeviceID)
-					protocolDevice.MaxSequence = fs.Sequence(protocol.LocalDeviceID)
-				} else {
-					protocolDevice.IndexID = fs.IndexID(deviceCfg.DeviceID)
-					protocolDevice.MaxSequence = fs.Sequence(deviceCfg.DeviceID)
-				}
 			}
 
 			protocolFolder.Devices = append(protocolFolder.Devices, protocolDevice)
