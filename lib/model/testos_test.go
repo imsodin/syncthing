@@ -14,6 +14,7 @@ import (
 // fatal is the required common interface between *testing.B and *testing.T
 type fatal interface {
 	Fatal(...interface{})
+	Helper()
 }
 
 type fatalOs struct {
@@ -21,22 +22,26 @@ type fatalOs struct {
 }
 
 func (f *fatalOs) must(fn func() error) {
+	f.Helper()
 	if err := fn(); err != nil {
 		f.Fatal(err)
 	}
 }
 
 func (f *fatalOs) Chmod(name string, mode os.FileMode) error {
+	f.Helper()
 	f.must(func() error { return os.Chmod(name, mode) })
 	return nil
 }
 
 func (f *fatalOs) Chtimes(name string, atime time.Time, mtime time.Time) error {
+	f.Helper()
 	f.must(func() error { return os.Chtimes(name, atime, mtime) })
 	return nil
 }
 
 func (f *fatalOs) Create(name string) (*os.File, error) {
+	f.Helper()
 	file, err := os.Create(name)
 	if err != nil {
 		f.Fatal(err)
@@ -45,16 +50,19 @@ func (f *fatalOs) Create(name string) (*os.File, error) {
 }
 
 func (f *fatalOs) Mkdir(name string, perm os.FileMode) error {
+	f.Helper()
 	f.must(func() error { return os.Mkdir(name, perm) })
 	return nil
 }
 
 func (f *fatalOs) MkdirAll(name string, perm os.FileMode) error {
+	f.Helper()
 	f.must(func() error { return os.MkdirAll(name, perm) })
 	return nil
 }
 
 func (f *fatalOs) Remove(name string) error {
+	f.Helper()
 	if err := os.Remove(name); err != nil && !os.IsNotExist(err) {
 		f.Fatal(err)
 	}
@@ -62,6 +70,7 @@ func (f *fatalOs) Remove(name string) error {
 }
 
 func (f *fatalOs) RemoveAll(name string) error {
+	f.Helper()
 	if err := os.RemoveAll(name); err != nil && !os.IsNotExist(err) {
 		f.Fatal(err)
 	}
@@ -69,11 +78,13 @@ func (f *fatalOs) RemoveAll(name string) error {
 }
 
 func (f *fatalOs) Rename(oldname, newname string) error {
+	f.Helper()
 	f.must(func() error { return os.Rename(oldname, newname) })
 	return nil
 }
 
 func (f *fatalOs) Stat(name string) (os.FileInfo, error) {
+	f.Helper()
 	info, err := os.Stat(name)
 	if err != nil {
 		f.Fatal(err)
