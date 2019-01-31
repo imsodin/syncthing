@@ -2997,15 +2997,15 @@ func TestIssue4573(t *testing.T) {
 // TestInternalScan checks whether various fs operations are correctly represented
 // in the db after scanning.
 func TestInternalScan(t *testing.T) {
-	err := defaultFs.MkdirAll("internalScan", 0755)
-	if err != nil {
-		t.Fatal(err)
-	}
+	testOs := &fatalOs{t}
+
+	w, tmpDir := tmpDefaultWrapper()
 	defer func() {
-		defaultFs.RemoveAll("internalScan")
+		testOs.RemoveAll(tmpDir)
+		testOs.Remove(w.ConfigPath())
 	}()
 
-	testFs := fs.NewFilesystem(fs.FilesystemTypeBasic, filepath.Join(defaultFs.URI(), "internalScan"))
+	testFs := fs.NewFilesystem(fs.FilesystemTypeBasic, tmpDir)
 
 	testCases := map[string]func(protocol.FileInfo) bool{
 		"removeDir": func(f protocol.FileInfo) bool {
@@ -3041,16 +3041,10 @@ func TestInternalScan(t *testing.T) {
 		}
 	}
 
-	dbi := db.OpenMemory()
-	m := NewModel(defaultCfgWrapper, myID, "syncthing", "dev", dbi, nil)
-	m.AddFolder(defaultFolderConfig)
-	m.StartFolder("default")
-	m.ServeBackground()
-	defer m.Stop()
-	m.ScanFolder("default")
+	m := setupModel(w)
 
 	for _, dir := range baseDirs {
-		if err = testFs.RemoveAll(dir); err != nil {
+		if err := testFs.RemoveAll(dir); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -3064,7 +3058,7 @@ func TestInternalScan(t *testing.T) {
 	m.ScanFolder("default")
 
 	for path, cond := range testCases {
-		if f, ok := m.CurrentFolderFile("default", filepath.Join("internalScan", path)); !ok {
+		if f, ok := m.CurrentFolderFile("default", path); !ok {
 			t.Fatalf("%v missing in db", path)
 		} else if cond(f) {
 			t.Errorf("Incorrect db entry for %v", path)
