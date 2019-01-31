@@ -2198,16 +2198,14 @@ func (m *Model) generateClusterConfigWithoutSeqs(device protocol.DeviceID) proto
 		for _, device := range folderCfg.Devices {
 			deviceCfg, _ := m.cfg.Device(device.DeviceID)
 
-			protocolDevice := protocol.Device{
+			protocolFolder.Devices = append(protocolFolder.Devices, protocol.Device{
 				ID:          deviceCfg.DeviceID,
 				Name:        deviceCfg.Name,
 				Addresses:   deviceCfg.Addresses,
 				Compression: deviceCfg.Compression,
 				CertName:    deviceCfg.CertName,
 				Introducer:  deviceCfg.Introducer,
-			}
-
-			protocolFolder.Devices = append(protocolFolder.Devices, protocolDevice)
+			})
 		}
 
 		message.Folders = append(message.Folders, protocolFolder)

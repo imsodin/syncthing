@@ -57,8 +57,6 @@ func init() {
 	defaultCfg.Devices = append(defaultCfg.Devices, config.DeviceConfiguration{DeviceID: device1})
 	defaultCfg.Options.KeepTemporariesH = 1
 
-	defaultCfgWrapper = createTmpWrapper(defaultCfg)
-
 	defaultAutoAcceptCfg = config.Configuration{
 		Devices: []config.DeviceConfiguration{
 			{
@@ -128,6 +126,8 @@ func TestMain(m *testing.M) {
 	if err := os.Chtimes(filepath.Join("testdata", tmpName), future, future); err != nil {
 		panic(err)
 	}
+
+	defaultCfgWrapper = createTmpWrapper(defaultCfg)
 
 	exitCode := m.Run()
 
@@ -3763,7 +3763,7 @@ func TestRequestLimit(t *testing.T) {
 	dev, _ := w.Device(device1)
 	dev.MaxRequestKiB = 1
 	w.SetDevice(dev)
-	m, _ := setupModelWithConnection(w)
+	m, _ := setupModelWithConnectionFromWrapper(w)
 	defer m.Stop()
 
 	file := "tmpfile"

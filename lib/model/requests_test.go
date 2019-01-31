@@ -31,7 +31,7 @@ func TestRequestSimple(t *testing.T) {
 	// Verify that the model performs a request and creates a file based on
 	// an incoming index update.
 
-	m, fc, tmpDir, w := setupModelWithConnectionDefaultTmp()
+	m, fc, tmpDir, w := setupModelWithConnection()
 	defer func() {
 		m.Stop()
 		testOs.RemoveAll(tmpDir)
@@ -74,7 +74,7 @@ func TestSymlinkTraversalRead(t *testing.T) {
 		return
 	}
 
-	m, fc, tmpDir, w := setupModelWithConnectionDefaultTmp()
+	m, fc, tmpDir, w := setupModelWithConnection()
 	defer func() {
 		m.Stop()
 		testOs.RemoveAll(tmpDir)
@@ -118,7 +118,7 @@ func TestSymlinkTraversalWrite(t *testing.T) {
 		return
 	}
 
-	m, fc, tmpDir, w := setupModelWithConnectionDefaultTmp()
+	m, fc, tmpDir, w := setupModelWithConnection()
 	defer func() {
 		m.Stop()
 		testOs.RemoveAll(tmpDir)
@@ -183,7 +183,7 @@ func TestRequestCreateTmpSymlink(t *testing.T) {
 
 	// Test that an update for a temporary file is invalidated
 
-	m, fc, tmpDir, w := setupModelWithConnectionDefaultTmp()
+	m, fc, tmpDir, w := setupModelWithConnection()
 	defer func() {
 		m.Stop()
 		testOs.RemoveAll(tmpDir)
@@ -240,7 +240,7 @@ func TestRequestVersioningSymlinkAttack(t *testing.T) {
 	fcfg.Versioning = config.VersioningConfiguration{Type: "trashcan"}
 	w.SetFolder(fcfg)
 
-	m, fcs := setupModelWithConnection(w)
+	m, fcs := setupModelWithConnectionFromWrapper(w)
 	defer m.Stop()
 
 	fc := fcs[0]
@@ -308,29 +308,24 @@ func pullInvalidIgnored(t *testing.T, ft config.FolderType) {
 
 	testOs := &fatalOs{t}
 
-	tmpDir := createTmpDir()
-	cfg := defaultCfgWrapper.RawCopy()
-	cfg.Folders[0] = config.NewFolderConfiguration(protocol.LocalDeviceID, "default", "default", fs.FilesystemTypeBasic, tmpDir)
-	cfg.Folders[0].Devices = []config.FolderDeviceConfiguration{
-		{DeviceID: myID},
-		{DeviceID: device1},
-	}
-	cfg.Folders[0].Type = ft
-	w := createTmpWrapper(cfg)
-	m, fcs := setupModelWithConnection(w)
-	fc := fcs[0]
+	w, tmpDir := tmpDefaultWrapper()
 	defer func() {
-		m.Stop()
 		testOs.RemoveAll(tmpDir)
 		testOs.Remove(w.ConfigPath())
 	}()
+	fcfg := w.FolderList()[0]
+	fcfg.Type = ft
+	w.SetFolder(fcfg)
+	m, fcs := setupModelWithConnectionFromWrapper(w)
+	defer m.Stop()
+	fc := fcs[0]
 
 	// Reach in and update the ignore matcher to one that always does
 	// reloads when asked to, instead of checking file mtimes. This is
 	// because we might be changing the files on disk often enough that the
 	// mtimes will be unreliable to determine change status.
 	m.fmut.Lock()
-	m.folderIgnores["default"] = ignore.New(cfg.Folders[0].Filesystem(), ignore.WithChangeDetector(newAlwaysChanged()))
+	m.folderIgnores["default"] = ignore.New(fcfg.Filesystem(), ignore.WithChangeDetector(newAlwaysChanged()))
 	m.fmut.Unlock()
 
 	if err := m.SetIgnores("default", []string{"*ignored*"}); err != nil {
@@ -442,7 +437,7 @@ func pullInvalidIgnored(t *testing.T, ft config.FolderType) {
 func TestIssue4841(t *testing.T) {
 	testOs := &fatalOs{t}
 
-	m, fc, tmpDir, w := setupModelWithConnectionDefaultTmp()
+	m, fc, tmpDir, w := setupModelWithConnection()
 	defer func() {
 		m.Stop()
 		testOs.RemoveAll(tmpDir)
@@ -486,7 +481,7 @@ func TestIssue4841(t *testing.T) {
 func TestRescanIfHaveInvalidContent(t *testing.T) {
 	testOs := &fatalOs{t}
 
-	m, fc, tmpDir, w := setupModelWithConnectionDefaultTmp()
+	m, fc, tmpDir, w := setupModelWithConnection()
 	defer func() {
 		m.Stop()
 		testOs.RemoveAll(tmpDir)
@@ -557,7 +552,7 @@ func TestRescanIfHaveInvalidContent(t *testing.T) {
 func TestParentDeletion(t *testing.T) {
 	testOs := &fatalOs{t}
 
-	m, fc, tmpDir, w := setupModelWithConnectionDefaultTmp()
+	m, fc, tmpDir, w := setupModelWithConnection()
 	defer func() {
 		m.Stop()
 		testOs.RemoveAll(tmpDir)
@@ -645,7 +640,7 @@ func TestRequestSymlinkWindows(t *testing.T) {
 
 	testOs := &fatalOs{t}
 
-	m, fc, tmpDir, w := setupModelWithConnectionDefaultTmp()
+	m, fc, tmpDir, w := setupModelWithConnection()
 	defer func() {
 		m.Stop()
 		testOs.RemoveAll(tmpDir)
@@ -720,13 +715,13 @@ func tmpDefaultWrapper() (*config.Wrapper, string) {
 	return createTmpWrapper(cfg), tmpDir
 }
 
-func setupModelWithConnectionDefaultTmp() (*Model, *fakeConnection, string, *config.Wrapper) {
+func setupModelWithConnection() (*Model, *fakeConnection, string, *config.Wrapper) {
 	w, tmpDir := tmpDefaultWrapper()
-	m, fcs := setupModelWithConnection(w)
+	m, fcs := setupModelWithConnectionFromWrapper(w)
 	return m, fcs[0], tmpDir, w
 }
 
-func setupModelWithConnection(w *config.Wrapper) (*Model, []*fakeConnection) {
+func setupModelWithConnectionFromWrapper(w *config.Wrapper) (*Model, []*fakeConnection) {
 	m := setupModel(w)
 
 	devs := w.Devices()
@@ -786,7 +781,7 @@ func equalContents(path string, contents []byte) error {
 func TestRequestRemoteRenameChanged(t *testing.T) {
 	testOs := &fatalOs{t}
 
-	m, fc, tmpDir, w := setupModelWithConnectionDefaultTmp()
+	m, fc, tmpDir, w := setupModelWithConnection()
 	defer func() {
 		m.Stop()
 		testOs.RemoveAll(tmpDir)
@@ -870,7 +865,7 @@ func TestRequestRemoteRenameChanged(t *testing.T) {
 func TestRequestRemoteRenameConflict(t *testing.T) {
 	testOs := &fatalOs{t}
 
-	m, fc, tmpDir, w := setupModelWithConnectionDefaultTmp()
+	m, fc, tmpDir, w := setupModelWithConnection()
 	defer func() {
 		m.Stop()
 		testOs.RemoveAll(tmpDir)
@@ -968,7 +963,7 @@ func TestRequestRemoteRenameConflict(t *testing.T) {
 func TestRequestDeleteChanged(t *testing.T) {
 	testOs := &fatalOs{t}
 
-	m, fc, tmpDir, w := setupModelWithConnectionDefaultTmp()
+	m, fc, tmpDir, w := setupModelWithConnection()
 	defer func() {
 		m.Stop()
 		testOs.RemoveAll(tmpDir)
