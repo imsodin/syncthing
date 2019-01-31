@@ -3202,36 +3202,34 @@ func TestRemoveDirWithContent(t *testing.T) {
 }
 
 func TestIssue4475(t *testing.T) {
+	testOs := &fatalOs{t}
+
+	m, conn, tmpDir, w := setupModelWithConnection()
 	defer func() {
-		defaultFs.RemoveAll("delDir")
+		m.Stop()
+		testOs.RemoveAll(tmpDir)
+		testOs.Remove(w.ConfigPath())
 	}()
 
-	err := defaultFs.MkdirAll("delDir", 0755)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	dbi := db.OpenMemory()
-	m := NewModel(defaultCfgWrapper, myID, "syncthing", "dev", dbi, nil)
-	m.AddFolder(defaultFolderConfig)
-	m.StartFolder("default")
-	m.ServeBackground()
-	defer m.Stop()
-	m.ScanFolder("default")
+	testFs := fs.NewFilesystem(fs.FilesystemTypeBasic, tmpDir)
 
 	// Scenario: Dir is deleted locally and before syncing/index exchange
 	// happens, a file is create in that dir on the remote.
 	// This should result in the directory being recreated and added to the
 	// db locally.
 
-	if err = defaultFs.RemoveAll("delDir"); err != nil {
+	err := defaultFs.MkdirAll("delDir", 0755)
+	if err != nil {
 		t.Fatal(err)
 	}
 
 	m.ScanFolder("default")
 
-	conn := addFakeConn(m, device1)
-	conn.folder = "default"
+	if err = testFs.RemoveAll("delDir"); err != nil {
+		t.Fatal(err)
+	}
+
+	m.ScanFolder("default")
 
 	if fcfg, ok := m.cfg.Folder("default"); !ok || !fcfg.SharedWith(device1) {
 		t.Fatal("not shared with device1")
