@@ -1267,7 +1267,6 @@ func TestAutoAcceptNewFolderPremutationsNoPanic(t *testing.T) {
 						cfg.Folders = append(cfg.Folders, fcfg)
 					}
 					wcfg, m := newState(cfg)
-					defer testOs.Remove(wcfg.ConfigPath())
 					m.ClusterConfig(device1, protocol.ClusterConfig{
 						Folders: []protocol.Folder{dev1folder},
 					})
@@ -1277,6 +1276,7 @@ func TestAutoAcceptNewFolderPremutationsNoPanic(t *testing.T) {
 					m.Stop()
 					testOs.RemoveAll(id)
 					testOs.RemoveAll(label)
+					testOs.Remove(wcfg.ConfigPath())
 				}
 			}
 		}
