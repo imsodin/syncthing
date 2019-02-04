@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -42,17 +41,19 @@ func TestRequestSimple(t *testing.T) {
 	// We listen for incoming index updates and trigger when we see one for
 	// the expected test file.
 	done := make(chan struct{})
-	var once sync.Once
 	fc.mut.Lock()
 	fc.indexFn = func(folder string, fs []protocol.FileInfo) {
-		once.Do(func() {
-			for _, f := range fs {
-				if f.Name == "testfile" {
-					close(done)
-					return
-				}
+		select {
+		case <-done:
+			t.Fatalf("More than one index update sent")
+		default:
+		}
+		for _, f := range fs {
+			if f.Name == "testfile" {
+				close(done)
+				return
 			}
-		})
+		}
 	}
 	fc.mut.Unlock()
 
@@ -88,17 +89,19 @@ func TestSymlinkTraversalRead(t *testing.T) {
 	// We listen for incoming index updates and trigger when we see one for
 	// the expected test file.
 	done := make(chan struct{})
-	var once sync.Once
 	fc.mut.Lock()
 	fc.indexFn = func(folder string, fs []protocol.FileInfo) {
-		once.Do(func() {
-			for _, f := range fs {
-				if f.Name == "symlink" {
-					close(done)
-					return
-				}
+		select {
+		case <-done:
+			t.Fatalf("More than one index update sent")
+		default:
+		}
+		for _, f := range fs {
+			if f.Name == "symlink" {
+				close(done)
+				return
 			}
-		})
+		}
 	}
 	fc.mut.Unlock()
 
@@ -651,24 +654,26 @@ func TestRequestSymlinkWindows(t *testing.T) {
 		testOs.Remove(w.ConfigPath())
 	}()
 
-	first := make(chan struct{})
-	var once sync.Once
+	done := make(chan struct{})
 	fc.mut.Lock()
 	fc.indexFn = func(folder string, fs []protocol.FileInfo) {
-		once.Do(func() {
-			// expected first index
-			if len(fs) != 1 {
-				t.Fatalf("Expected just one file in index, got %v", fs)
-			}
-			f := fs[0]
-			if f.Name != "link" {
-				t.Fatalf(`Got file info with path "%v", expected "link"`, f.Name)
-			}
-			if !f.IsInvalid() {
-				t.Errorf(`File info was not marked as invalid`)
-			}
-			close(first)
-		})
+		select {
+		case <-done:
+			t.Fatalf("More than one index update sent")
+		default:
+		}
+		// expected first index
+		if len(fs) != 1 {
+			t.Fatalf("Expected just one file in index, got %v", fs)
+		}
+		f := fs[0]
+		if f.Name != "link" {
+			t.Fatalf(`Got file info with path "%v", expected "link"`, f.Name)
+		}
+		if !f.IsInvalid() {
+			t.Errorf(`File info was not marked as invalid`)
+		}
+		close(done)
 	}
 	fc.mut.Unlock()
 
@@ -676,7 +681,7 @@ func TestRequestSymlinkWindows(t *testing.T) {
 	fc.sendIndexUpdate()
 
 	select {
-	case <-first:
+	case <-done:
 	case <-time.After(time.Second):
 		t.Fatalf("timed out before pull was finished")
 	}
@@ -798,14 +803,16 @@ func TestRequestRemoteRenameChanged(t *testing.T) {
 
 	done := make(chan struct{})
 	fc.mut.Lock()
-	var once sync.Once
 	fc.indexFn = func(folder string, fs []protocol.FileInfo) {
-		once.Do(func() {
-			if len(fs) != 2 {
-				t.Fatalf("Received index with %v indexes instead of 2", len(fs))
-			}
-			close(done)
-		})
+		select {
+		case <-done:
+			t.Fatalf("More than one index update sent")
+		default:
+		}
+		if len(fs) != 2 {
+			t.Fatalf("Received index with %v indexes instead of 2", len(fs))
+		}
+		close(done)
 	}
 	fc.mut.Unlock()
 
@@ -823,10 +830,14 @@ func TestRequestRemoteRenameChanged(t *testing.T) {
 	select {
 	case <-done:
 		done = make(chan struct{})
-		var once sync.Once
 		fc.mut.Lock()
 		fc.indexFn = func(folder string, fs []protocol.FileInfo) {
-			once.Do(func() { close(done) })
+			select {
+			case <-done:
+				t.Fatalf("More than one index update sent")
+			default:
+			}
+			close(done)
 		}
 		fc.mut.Unlock()
 	case <-time.After(10 * time.Second):
@@ -984,9 +995,13 @@ func TestRequestDeleteChanged(t *testing.T) {
 
 	done := make(chan struct{})
 	fc.mut.Lock()
-	var once sync.Once
 	fc.indexFn = func(folder string, fs []protocol.FileInfo) {
-		once.Do(func() { close(done) })
+		select {
+		case <-done:
+			t.Fatalf("More than one index update sent")
+		default:
+		}
+		close(done)
 	}
 	fc.mut.Unlock()
 
@@ -1001,6 +1016,17 @@ func TestRequestDeleteChanged(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("timed out")
 	}
+
+	fc.mut.Lock()
+	fc.indexFn = func(folder string, fs []protocol.FileInfo) {
+		select {
+		case <-done:
+			t.Fatalf("More than one index update sent")
+		default:
+		}
+		close(done)
+	}
+	fc.mut.Unlock()
 
 	fd, err := tfs.OpenFile(a, fs.OptReadWrite, 0644)
 	if err != nil {
