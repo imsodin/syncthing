@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -1095,7 +1096,9 @@ func TestIssue5063(t *testing.T) {
 	wcfg, m := newState(defaultAutoAcceptCfg)
 	defer testOs.Remove(wcfg.ConfigPath())
 
-	addAndVerify := func(wg *sync.WaitGroup) {
+	wg := sync.WaitGroup{}
+
+	addAndVerify := func() {
 		id := srand.String(8)
 		m.ClusterConfig(device1, protocol.ClusterConfig{
 			Folders: []protocol.Folder{
@@ -1106,19 +1109,28 @@ func TestIssue5063(t *testing.T) {
 			},
 		})
 		testOs.RemoveAll(id)
-		wg.Done()
 		if fcfg, ok := wcfg.Folder(id); !ok || !fcfg.SharedWith(device1) {
 			t.Error("expected shared", id)
 		}
+		wg.Done()
 	}
 
-	wg := &sync.WaitGroup{}
 	for i := 0; i <= 10; i++ {
 		wg.Add(1)
-		go addAndVerify(wg)
+		go addAndVerify()
 	}
 
-	wg.Wait()
+	finished := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(finished)
+	}()
+	select {
+	case <-finished:
+	case <-time.After(10 * time.Second):
+		debug.PrintStack()
+		t.Fatal("Timed out before all devices were added")
+	}
 }
 
 func TestAutoAcceptRejected(t *testing.T) {
