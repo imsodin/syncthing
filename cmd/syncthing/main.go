@@ -15,7 +15,6 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -127,7 +126,6 @@ func setBuildMetadata() {
 var (
 	myID protocol.DeviceID
 	stop = make(chan int)
-	lans []*net.IPNet
 )
 
 const (
@@ -436,7 +434,9 @@ func main() {
 	}
 
 	if options.resetDatabase {
-		resetDB()
+		if err := resetDB(); err != nil {
+			l.Fatalln("Resetting database:", err)
+		}
 		return
 	}
 
@@ -450,7 +450,9 @@ func main() {
 func openGUI() {
 	cfg, _ := loadOrDefaultConfig()
 	if cfg.GUI().Enabled {
-		openURL(cfg.GUI().URL())
+		if err := openURL(cfg.GUI().URL()); err != nil {
+			l.Fatalln("Open URL:", err)
+		}
 	} else {
 		l.Warnln("Browser: GUI is currently disabled")
 	}
@@ -823,9 +825,11 @@ func syncthingMain(runtimeOptions RuntimeOptions) {
 	if runtimeOptions.cpuProfile {
 		f, err := os.Create(fmt.Sprintf("cpu-%d.pprof", os.Getpid()))
 		if err != nil {
-			log.Fatal(err)
+			l.Fatalln("Creating profile:", err)
 		}
-		pprof.StartCPUProfile(f)
+		if err := pprof.StartCPUProfile(f); err != nil {
+			l.Fatalln("Starting profile:", err)
+		}
 	}
 
 	myDev, _ := cfg.Device(myID)
@@ -1058,7 +1062,7 @@ func setupGUI(mainService *suture.Supervisor, cfg *config.Wrapper, m *model.Mode
 		// Can potentially block if the utility we are invoking doesn't
 		// fork, and just execs, hence keep it in its own routine.
 		<-api.startedOnce
-		go openURL(guiCfg.URL())
+		go func() { _ = openURL(guiCfg.URL()) }()
 	}
 }
 

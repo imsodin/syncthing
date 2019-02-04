@@ -60,14 +60,13 @@ type copyBlocksState struct {
 const retainBits = fs.ModeSetgid | fs.ModeSetuid | fs.ModeSticky
 
 var (
-	activity               = newDeviceActivity()
-	errNoDevice            = errors.New("peers who had this file went away, or the file has changed while syncing. will retry later")
-	errSymlinksUnsupported = errors.New("symlinks not supported")
-	errDirHasToBeScanned   = errors.New("directory contains unexpected files, scheduling scan")
-	errDirHasIgnored       = errors.New("directory contains ignored files (see ignore documentation for (?d) prefix)")
-	errDirNotEmpty         = errors.New("directory is not empty; files within are probably ignored on connected devices only")
-	errNotAvailable        = errors.New("no connected device has the required version of this file")
-	errModified            = errors.New("file modified but not rescanned; will try again later")
+	activity             = newDeviceActivity()
+	errNoDevice          = errors.New("peers who had this file went away, or the file has changed while syncing. will retry later")
+	errDirHasToBeScanned = errors.New("directory contains unexpected files, scheduling scan")
+	errDirHasIgnored     = errors.New("directory contains ignored files (see ignore documentation for (?d) prefix)")
+	errDirNotEmpty       = errors.New("directory is not empty; files within are probably ignored on connected devices only")
+	errNotAvailable      = errors.New("no connected device has the required version of this file")
+	errModified          = errors.New("file modified but not rescanned; will try again later")
 )
 
 const (
@@ -882,7 +881,8 @@ func (f *sendReceiveFolder) renameFile(cur, source, target protocol.FileInfo, ig
 		scanChan <- target.Name
 		err = errModified
 	default:
-		if fi, err := scanner.CreateFileInfo(stat, target.Name, f.fs); err == nil {
+		var fi protocol.FileInfo
+		if fi, err = scanner.CreateFileInfo(stat, target.Name, f.fs); err == nil {
 			if !fi.IsEquivalentOptional(curTarget, f.IgnorePerms, true, protocol.LocalAllFlags) {
 				// Target changed
 				scanChan <- target.Name
