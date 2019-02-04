@@ -1305,6 +1305,7 @@ func TestAutoAcceptMultipleFolders(t *testing.T) {
 	defer testOs.RemoveAll(id1)
 	id2 := srand.String(8)
 	defer testOs.RemoveAll(id2)
+	defer m.Stop()
 	m.ClusterConfig(device1, protocol.ClusterConfig{
 		Folders: []protocol.Folder{
 			{
@@ -1343,6 +1344,7 @@ func TestAutoAcceptExistingFolder(t *testing.T) {
 	}
 	wcfg, m := newState(tcfg)
 	defer testOs.Remove(wcfg.ConfigPath())
+	defer m.Stop()
 	if fcfg, ok := wcfg.Folder(id); !ok || fcfg.SharedWith(device1) {
 		t.Error("missing folder, or shared", id)
 	}
@@ -1378,6 +1380,7 @@ func TestAutoAcceptNewAndExistingFolder(t *testing.T) {
 	}
 	wcfg, m := newState(tcfg)
 	defer testOs.Remove(wcfg.ConfigPath())
+	defer m.Stop()
 	if fcfg, ok := wcfg.Folder(id1); !ok || fcfg.SharedWith(device1) {
 		t.Error("missing folder, or shared", id1)
 	}
@@ -1421,6 +1424,7 @@ func TestAutoAcceptAlreadyShared(t *testing.T) {
 	}
 	wcfg, m := newState(tcfg)
 	defer testOs.Remove(wcfg.ConfigPath())
+	defer m.Stop()
 	if fcfg, ok := wcfg.Folder(id); !ok || !fcfg.SharedWith(device1) {
 		t.Error("missing folder, or not shared", id)
 	}
@@ -1449,6 +1453,7 @@ func TestAutoAcceptNameConflict(t *testing.T) {
 	defer testOs.RemoveAll(label)
 	wcfg, m := newState(defaultAutoAcceptCfg)
 	defer testOs.Remove(wcfg.ConfigPath())
+	defer m.Stop()
 	m.ClusterConfig(device1, protocol.ClusterConfig{
 		Folders: []protocol.Folder{
 			{
@@ -1472,6 +1477,7 @@ func TestAutoAcceptPrefersLabel(t *testing.T) {
 	label := srand.String(8)
 	defer testOs.RemoveAll(id)
 	defer testOs.RemoveAll(label)
+	defer m.Stop()
 	m.ClusterConfig(device1, protocol.ClusterConfig{
 		Folders: []protocol.Folder{
 			{
@@ -1497,6 +1503,7 @@ func TestAutoAcceptFallsBackToID(t *testing.T) {
 	testOs.MkdirAll(label, 0777)
 	defer testOs.RemoveAll(label)
 	defer testOs.RemoveAll(id)
+	defer m.Stop()
 	m.ClusterConfig(device1, protocol.ClusterConfig{
 		Folders: []protocol.Folder{
 			{
@@ -1531,6 +1538,7 @@ func TestAutoAcceptPausedWhenFolderConfigChanged(t *testing.T) {
 	tcfg.Folders = []config.FolderConfiguration{fcfg}
 	wcfg, m := newState(tcfg)
 	defer testOs.Remove(wcfg.ConfigPath())
+	defer m.Stop()
 	if fcfg, ok := wcfg.Folder(id); !ok || !fcfg.SharedWith(device1) {
 		t.Error("missing folder, or not shared", id)
 	}
@@ -1590,6 +1598,7 @@ func TestAutoAcceptPausedWhenFolderConfigNotChanged(t *testing.T) {
 	tcfg.Folders = []config.FolderConfiguration{fcfg}
 	wcfg, m := newState(tcfg)
 	defer testOs.Remove(wcfg.ConfigPath())
+	defer m.Stop()
 	if fcfg, ok := wcfg.Folder(id); !ok || !fcfg.SharedWith(device1) {
 		t.Error("missing folder, or not shared", id)
 	}
