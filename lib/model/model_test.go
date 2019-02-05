@@ -45,7 +45,7 @@ var defaultAutoAcceptCfg config.Configuration
 var tmpLocation string
 
 func init() {
-	myID, _ = protocol.DeviceIDFromString("ABBHGDL-33SPQV2-CB3CTA4-LS3SMK3-3MVPTMW-TKHJUXR-RHQMMA3-BDDI5AE")
+	myID, _ = protocol.DeviceIDFromString("ZNWFSWE-RWRV2BD-45BLMCV-LTDE2UR-4LJDW6J-R5BPWEB-TXD27XJ-IZF5RA4")
 	device1, _ = protocol.DeviceIDFromString("AIR6LPZ-7K4PTTV-UXQSMUU-CPQ5YWH-OEDFIIQ-JUG777G-2YQXXR5-YD6AWQR")
 	device2, _ = protocol.DeviceIDFromString("GYRZZQB-IRNPV4Z-T7TC52W-EQYJ3TT-FDQW6MW-DFLMU42-SSSU6EM-FBK2VAY")
 
