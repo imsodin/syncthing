@@ -830,16 +830,6 @@ func TestRequestRemoteRenameChanged(t *testing.T) {
 	select {
 	case <-done:
 		done = make(chan struct{})
-		fc.mut.Lock()
-		fc.indexFn = func(folder string, fs []protocol.FileInfo) {
-			select {
-			case <-done:
-				t.Fatalf("More than one index update sent")
-			default:
-			}
-			close(done)
-		}
-		fc.mut.Unlock()
 	case <-time.After(10 * time.Second):
 		t.Fatal("timed out")
 	}
@@ -849,6 +839,36 @@ func TestRequestRemoteRenameChanged(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+
+	var gotA, gotB bool
+	fc.mut.Lock()
+	fc.indexFn = func(folder string, fs []protocol.FileInfo) {
+		select {
+		case <-done:
+			t.Fatalf("Received more index updates than expected")
+		default:
+		}
+		for _, f := range fs {
+			switch {
+			case f.Name == a:
+				if gotA {
+					t.Error("Got more than one index update for", f.Name)
+				}
+				gotA = true
+			case f.Name == b:
+				if gotB {
+					t.Error("Got more than one index update for", f.Name)
+				}
+				gotB = true
+			default:
+				t.Error("Got unexpected file in index update", f.Name)
+			}
+		}
+		if gotA && gotB {
+			close(done)
+		}
+	}
+	fc.mut.Unlock()
 
 	fd, err := tfs.OpenFile(b, fs.OptReadWrite, 0644)
 	if err != nil {
