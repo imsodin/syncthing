@@ -251,9 +251,8 @@ func TestRequestVersioningSymlinkAttack(t *testing.T) {
 	w.SetFolder(fcfg)
 
 	m, fcs := setupModelWithConnectionFromWrapper(w)
-	defer m.Stop()
-
 	fc := fcs[0]
+	defer m.Stop()
 
 	// Create a temporary directory that we will use as target to see if
 	// we can escape to it
@@ -318,17 +317,17 @@ func pullInvalidIgnored(t *testing.T, ft config.FolderType) {
 
 	testOs := &fatalOs{t}
 
-	w, tmpDir := tmpDefaultWrapper()
-	defer func() {
-		testOs.RemoveAll(tmpDir)
-		testOs.Remove(w.ConfigPath())
-	}()
-	fcfg := w.FolderList()[0]
+	w := createTmpWrapper(defaultCfgWrapper.RawCopy())
+	fcfg, tmpDir := testFolderConfigTmp()
 	fcfg.Type = ft
 	w.SetFolder(fcfg)
 	m, fcs := setupModelWithConnectionFromWrapper(w)
-	defer m.Stop()
 	fc := fcs[0]
+	defer func() {
+		m.Stop()
+		testOs.RemoveAll(tmpDir)
+		testOs.Remove(w.ConfigPath())
+	}()
 
 	// Reach in and update the ignore matcher to one that always does
 	// reloads when asked to, instead of checking file mtimes. This is
@@ -708,6 +707,13 @@ func TestRequestSymlinkWindows(t *testing.T) {
 	}
 }
 
+func tmpDefaultWrapper() (*config.Wrapper, string) {
+	w := createTmpWrapper(defaultCfgWrapper.RawCopy())
+	fcfg, tmpDir := testFolderConfigTmp()
+	w.SetFolder(fcfg)
+	return w, tmpDir
+}
+
 func testFolderConfigTmp() (config.FolderConfiguration, string) {
 	tmpDir := createTmpDir()
 	return testFolderConfig(tmpDir), tmpDir
@@ -718,13 +724,6 @@ func testFolderConfig(path string) config.FolderConfiguration {
 	cfg.FSWatcherEnabled = false
 	cfg.Devices = append(cfg.Devices, config.FolderDeviceConfiguration{DeviceID: device1})
 	return cfg
-}
-
-func tmpDefaultWrapper() (*config.Wrapper, string) {
-	cfg := defaultCfgWrapper.RawCopy()
-	fcfg, tmpDir := testFolderConfigTmp()
-	cfg.Folders = []config.FolderConfiguration{fcfg}
-	return createTmpWrapper(cfg), tmpDir
 }
 
 func setupModelWithConnection() (*Model, *fakeConnection, string, *config.Wrapper) {
@@ -749,12 +748,6 @@ func setupModelWithConnectionFromWrapper(w *config.Wrapper) (*Model, []*fakeConn
 	m.ScanFolders()
 
 	return m, fcs
-}
-
-func setupModelTmpDefault() (*Model, string, *config.Wrapper) {
-	w, tmpDir := tmpDefaultWrapper()
-	m := setupModel(w)
-	return m, tmpDir, w
 }
 
 func setupModel(w *config.Wrapper) *Model {
@@ -829,11 +822,6 @@ func TestRequestRemoteRenameChanged(t *testing.T) {
 	fc.sendIndexUpdate()
 	select {
 	case <-done:
-			select {
-			case <-done:
-				t.Fatalf("More than one index update sent")
-			default:
-			}
 	case <-time.After(10 * time.Second):
 		t.Fatal("timed out")
 	}
@@ -905,12 +893,9 @@ func TestRequestRemoteRenameChanged(t *testing.T) {
 	fc.sendIndexUpdate()
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
-		// t.Errorf("timed out")
-		t.Log("timed out without receiving all expected index updates")
+	case <-time.After(10 * time.Second):
+		t.Errorf("timed out without receiving all expected index updates")
 	}
-
-	m.ScanFolders()
 
 	// Check outcome
 	tfs.Walk(".", func(path string, info fs.FileInfo, err error) error {
