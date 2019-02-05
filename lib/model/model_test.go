@@ -3246,7 +3246,7 @@ func TestIssue4475(t *testing.T) {
 	// This should result in the directory being recreated and added to the
 	// db locally.
 
-	err := defaultFs.MkdirAll("delDir", 0755)
+	err := testFs.MkdirAll("delDir", 0755)
 	if err != nil {
 		t.Fatal(err)
 	}
