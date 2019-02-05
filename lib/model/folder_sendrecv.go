@@ -196,7 +196,7 @@ func (f *sendReceiveFolder) pull() bool {
 
 		changed := f.pullerIteration(ignores, folderFiles, scanChan)
 
-		l.Debugln(f, "changed", changed, "on try", tries)
+		l.Debugln(f, "changed", changed, "on try", tries+1)
 
 		if changed == 0 {
 			// No files were changed by the puller, so we are in
