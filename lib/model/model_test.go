@@ -1836,7 +1836,7 @@ func TestROScanRecovery(t *testing.T) {
 		return
 	}
 
-	fd, _ := testOs.Create(filepath.Join(fcfg.Path, config.DefaultMarkerName))
+	fd := testOs.Create(filepath.Join(fcfg.Path, config.DefaultMarkerName))
 	fd.Close()
 
 	if err := waitFor(""); err != nil {
@@ -1923,10 +1923,7 @@ func TestRWScanRecovery(t *testing.T) {
 		return
 	}
 
-	fd, err := testOs.Create(filepath.Join(fcfg.Path, config.DefaultMarkerName))
-	if err != nil {
-		t.Fatal(err)
-	}
+	fd := testOs.Create(filepath.Join(fcfg.Path, config.DefaultMarkerName))
 	fd.Close()
 
 	if err := waitFor(""); err != nil {
@@ -3152,7 +3149,7 @@ func TestCustomMarkerName(t *testing.T) {
 	}
 
 	testOs.Mkdir(fcfg.Path, 0700)
-	fd, _ := testOs.Create(filepath.Join(fcfg.Path, "myfile"))
+	fd := testOs.Create(filepath.Join(fcfg.Path, "myfile"))
 	fd.Close()
 
 	if err := waitFor(""); err != nil {

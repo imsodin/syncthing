@@ -28,66 +28,59 @@ func (f *fatalOs) must(fn func() error) {
 	}
 }
 
-func (f *fatalOs) Chmod(name string, mode os.FileMode) error {
+func (f *fatalOs) Chmod(name string, mode os.FileMode) {
 	f.Helper()
 	f.must(func() error { return os.Chmod(name, mode) })
-	return nil
 }
 
-func (f *fatalOs) Chtimes(name string, atime time.Time, mtime time.Time) error {
+func (f *fatalOs) Chtimes(name string, atime time.Time, mtime time.Time) {
 	f.Helper()
 	f.must(func() error { return os.Chtimes(name, atime, mtime) })
-	return nil
 }
 
-func (f *fatalOs) Create(name string) (*os.File, error) {
+func (f *fatalOs) Create(name string) *os.File {
 	f.Helper()
 	file, err := os.Create(name)
 	if err != nil {
 		f.Fatal(err)
 	}
-	return file, nil
+	return file
 }
 
-func (f *fatalOs) Mkdir(name string, perm os.FileMode) error {
+func (f *fatalOs) Mkdir(name string, perm os.FileMode) {
 	f.Helper()
 	f.must(func() error { return os.Mkdir(name, perm) })
-	return nil
 }
 
-func (f *fatalOs) MkdirAll(name string, perm os.FileMode) error {
+func (f *fatalOs) MkdirAll(name string, perm os.FileMode) {
 	f.Helper()
 	f.must(func() error { return os.MkdirAll(name, perm) })
-	return nil
 }
 
-func (f *fatalOs) Remove(name string) error {
+func (f *fatalOs) Remove(name string) {
 	f.Helper()
 	if err := os.Remove(name); err != nil && !os.IsNotExist(err) {
 		f.Fatal(err)
 	}
-	return nil
 }
 
-func (f *fatalOs) RemoveAll(name string) error {
+func (f *fatalOs) RemoveAll(name string) {
 	f.Helper()
 	if err := os.RemoveAll(name); err != nil && !os.IsNotExist(err) {
 		f.Fatal(err)
 	}
-	return nil
 }
 
-func (f *fatalOs) Rename(oldname, newname string) error {
+func (f *fatalOs) Rename(oldname, newname string) {
 	f.Helper()
 	f.must(func() error { return os.Rename(oldname, newname) })
-	return nil
 }
 
-func (f *fatalOs) Stat(name string) (os.FileInfo, error) {
+func (f *fatalOs) Stat(name string) os.FileInfo {
 	f.Helper()
 	info, err := os.Stat(name)
 	if err != nil {
 		f.Fatal(err)
 	}
-	return info, nil
+	return info
 }

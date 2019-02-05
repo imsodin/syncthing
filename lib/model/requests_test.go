@@ -829,6 +829,11 @@ func TestRequestRemoteRenameChanged(t *testing.T) {
 	fc.sendIndexUpdate()
 	select {
 	case <-done:
+			select {
+			case <-done:
+				t.Fatalf("More than one index update sent")
+			default:
+			}
 	case <-time.After(10 * time.Second):
 		t.Fatal("timed out")
 	}
