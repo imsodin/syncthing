@@ -469,7 +469,13 @@ func TestHTTPLogin(t *testing.T) {
 	}
 }
 
-func startHTTP(cfg *mockedConfig) (string, error) {
+func startHTTP(cfg *mockedConfig) (url string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("Panicked while starting API service: %v", r)
+		}
+	}()
+
 	model := new(mockedModel)
 	httpsCertFile := "../../test/h1/https-cert.pem"
 	httpsKeyFile := "../../test/h1/https-key.pem"
@@ -797,8 +803,9 @@ func TestHostCheck(t *testing.T) {
 	cfg.gui.RawAddress = "[::1]:0"
 	baseURL, err = startHTTP(cfg)
 	if err != nil {
-		// E.g. travis doesn't have functioning IPv6: https://github.com/travis-ci/travis-ci/issues/8711
-		t.Skip("Failed to run on IPv6, skipping")
+		// Skip checking IPv6, e.g. travis doesn't have functioning IPv6:
+		// https://github.com/travis-ci/travis-ci/issues/8711
+		return
 	}
 
 	// A normal HTTP get to the localhost-bound service should succeed
