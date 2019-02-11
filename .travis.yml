@@ -6,8 +6,13 @@ go:
 env:
   - GO111MODULE=on
 
-script:
-  - go run build.go -coverage test
+install: true                   # Don't do `go get ./...`
 
-after_success:
-  - bash <(curl -s https://codecov.io/bash)
+script:
+  # - go run build.go -coverage test
+  - go run build.go build
+  - go test -v -race -tags purego ./cmd/syncthing
+
+
+# after_success:
+#   - bash <(curl -s https://codecov.io/bash)
