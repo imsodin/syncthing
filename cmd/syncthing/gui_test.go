@@ -470,12 +470,6 @@ func TestHTTPLogin(t *testing.T) {
 }
 
 func startHTTP(cfg *mockedConfig) (url string, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("Panicked while starting API service: %v", r)
-		}
-	}()
-
 	model := new(mockedModel)
 	httpsCertFile := "../../test/h1/https-cert.pem"
 	httpsKeyFile := "../../test/h1/https-key.pem"
@@ -502,7 +496,12 @@ func startHTTP(cfg *mockedConfig) (url string, err error) {
 	supervisor.ServeBackground()
 
 	// Make sure the API service is listening, and get the URL to use.
-	addr := <-addrChan
+	var addr string
+	select {
+	case addr = <-addrChan:
+	case <-svc.startupFailed:
+		return "", fmt.Errorf("Starting API/GUI: %v", svc.startupErr)
+	}
 	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
 	if err != nil {
 		return "", fmt.Errorf("Weird address from API service: %v", err)
