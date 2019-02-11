@@ -797,7 +797,8 @@ func TestHostCheck(t *testing.T) {
 	cfg.gui.RawAddress = "[::1]:0"
 	baseURL, err = startHTTP(cfg)
 	if err != nil {
-		t.Fatal(err)
+		// E.g. travis doesn't have functioning IPv6: https://github.com/travis-ci/travis-ci/issues/8711
+		t.Skip("Failed to run on IPv6, skipping")
 	}
 
 	// A normal HTTP get to the localhost-bound service should succeed
