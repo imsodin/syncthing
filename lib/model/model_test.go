@@ -1060,6 +1060,8 @@ func TestAutoAcceptNewFolderPremutationsNoPanic(t *testing.T) {
 					cleanupModel(m)
 					testOs.RemoveAll(id)
 					testOs.RemoveAll(label)
+					// Give stuff stopping from context a little breathing room
+					time.Sleep(10 * time.Millisecond)
 				}
 			}
 		}

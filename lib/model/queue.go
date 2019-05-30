@@ -33,7 +33,7 @@ func newJobQueue(order config.PullOrder, loc string) *jobQueue {
 		order:          order,
 		mut:            sync.NewMutex(),
 	}
-	q.queued = diskoverflow.NewSorted(loc)
+	q.queued = diskoverflow.NewSorted(loc, diskoverflow.OrigDefaultOverflowBytes)
 	return q
 }
 
@@ -53,7 +53,7 @@ func (q *jobQueue) Push(file string, size int64, modified time.Time) {
 		key, _ = modified.MarshalText()
 	}
 	q.mut.Lock()
-	q.queued.Add(key, &queueValue{file})
+	q.queued.Add(key, []byte(file))
 	q.mut.Unlock()
 }
 
@@ -74,12 +74,11 @@ func (q *jobQueue) Pop() (string, bool) {
 	case config.OrderLargestFirst, config.OrderNewestFirst:
 		pop = q.queued.PopLast
 	}
-	v := &queueValue{}
-	ok := pop(v)
+	d, ok := pop()
 	if !ok {
 		return "", false
 	}
-	f := v.string
+	f := string(d)
 	if _, ok := q.handledAtFront[f]; ok {
 		return "", false
 	}
@@ -93,10 +92,8 @@ func (q *jobQueue) BringToFront(filename string) {
 
 	it := q.queued.NewIterator()
 	defer it.Release()
-	v := &queueValue{}
 	for it.Next() {
-		it.Value(v)
-		if f := v.string; f == filename {
+		if f := string(it.Value()); f == filename {
 			q.broughtToFront = append([]string{f}, q.broughtToFront...)
 			return
 		}
@@ -133,17 +130,19 @@ func (q *jobQueue) Jobs() ([]string, []string) {
 		}
 	}
 
-	var it diskoverflow.Iterator
+	it := q.queued.NewIterator()
+	var step func() bool
+	var ok bool
 	switch q.order {
 	case config.OrderLargestFirst, config.OrderNewestFirst:
-		it = q.queued.NewReverseIterator()
+		step = it.Prev
+		ok = it.Last()
 	default:
-		it = q.queued.NewIterator()
+		step = it.Next
+		ok = it.First()
 	}
-	v := &queueValue{}
-	for it.Next() {
-		it.Value(v)
-		f := v.string
+	for ; ok; ok = step() {
+		f := string(it.Value())
 		if _, ok := atFront[f]; !ok {
 			if _, ok := q.handledAtFront[f]; !ok {
 				queued = append(queued, f)
@@ -171,26 +170,4 @@ func (q *jobQueue) lenProgress() int {
 	q.mut.Lock()
 	defer q.mut.Unlock()
 	return len(q.progress)
-}
-
-// queueValue implements diskoverflow.Value for strings
-type queueValue struct {
-	string
-}
-
-func (q *queueValue) ProtoSize() int {
-	return len(q.string)
-}
-
-func (q *queueValue) Marshal() ([]byte, error) {
-	return []byte(q.string), nil
-}
-
-func (q *queueValue) Unmarshal(v []byte) error {
-	q.string = string(v)
-	return nil
-}
-
-func (q *queueValue) Reset() {
-	q.string = ""
 }

@@ -270,8 +270,8 @@ func (f *sendReceiveFolder) pullerIteration(scanChan chan<- string) int {
 	}()
 
 	overflowLoc := locations.Get(locations.Database)
-	fileDeletions := diskoverflow.NewMap(overflowLoc)
-	dirDeletions := diskoverflow.NewSlice(overflowLoc)
+	fileDeletions := diskoverflow.NewMap(overflowLoc, diskoverflow.OrigDefaultOverflowBytes)
+	dirDeletions := diskoverflow.NewSlice(overflowLoc, diskoverflow.OrigDefaultOverflowBytes)
 	changed, err := f.processNeeded(dbUpdateChan, copyChan, scanChan, fileDeletions, dirDeletions)
 
 	// Signal copy and puller routines that we are done with the in data for
@@ -307,7 +307,7 @@ func (f *sendReceiveFolder) processNeeded(dbUpdateChan chan<- dbUpdateJob, copyC
 	defer f.queue.Close()
 
 	changed := 0
-	buckets := diskoverflow.NewMap(locations.Get(locations.Database))
+	buckets := diskoverflow.NewMap(locations.Get(locations.Database), diskoverflow.OrigDefaultOverflowBytes)
 
 	// Iterate the list of items that we need and sort them into piles.
 	// Regular files to pull goes into the file queue, everything else
@@ -343,7 +343,8 @@ func (f *sendReceiveFolder) processNeeded(dbUpdateChan chan<- dbUpdateJob, copyC
 			if file.IsDirectory() {
 				// Perform directory deletions at the end, as we may have
 				// files to delete inside them before we get to that point.
-				dirDeletions.Append(&file)
+				d, _ := file.Marshal()
+				dirDeletions.Append(d)
 			} else if file.IsSymlink() {
 				f.deleteFile(file, dbUpdateChan, scanChan)
 			} else {
@@ -353,16 +354,19 @@ func (f *sendReceiveFolder) processNeeded(dbUpdateChan chan<- dbUpdateJob, copyC
 				// WithNeed, furthermore, the file can simply be of the wrong
 				// type if we haven't yet managed to pull it.
 				if ok && !df.IsDeleted() && !df.IsSymlink() && !df.IsDirectory() && !df.IsInvalid() {
-					fileDeletions.Set(file.Name, &file)
+					d, _ := file.Marshal()
+					fileDeletions.Set([]byte(file.Name), d)
 					// Put files into buckets per first hash
-					key := string(df.Blocks[0].Hash)
+					key := df.Blocks[0].Hash
 					v := &protocol.Index{}
-					if ok := buckets.Get(key, v); ok {
+					if d, ok := buckets.Get(key); ok {
+						_ = v.Unmarshal(d)
 						v.Files = append(v.Files, df)
 					} else {
 						v.Files = []protocol.FileInfo{df}
 					}
-					buckets.Set(key, v)
+					d, _ = v.Marshal()
+					buckets.Set(key, d)
 				} else {
 					f.deleteFileWithCurrent(file, df, ok, dbUpdateChan, scanChan)
 				}
@@ -453,10 +457,11 @@ nextFile:
 
 		// Check our list of files to be removed for a match, in which case
 		// we can just do a rename instead.
-		key := string(fi.Blocks[0].Hash)
+		key := fi.Blocks[0].Hash
 		var list []protocol.FileInfo
-		v := &protocol.Index{}
-		if ok := buckets.Get(key, v); ok {
+		if d, ok := buckets.Get(key); ok {
+			v := &protocol.Index{}
+			_ = v.Unmarshal(d)
 			list = v.Files
 		}
 		for i, candidate := range list {
@@ -465,13 +470,15 @@ nextFile:
 				lidx := len(list) - 1
 				list[i] = list[lidx]
 				list = list[:lidx]
-				buckets.Set(key, &protocol.Index{Files: list})
+				d, _ := (&protocol.Index{Files: list}).Marshal()
+				buckets.Set(key, d)
 
 				// candidate is our current state of the file, where as the
 				// desired state with the delete bit set is in the deletion
 				// map.
 				v := &protocol.FileInfo{}
-				_ = fileDeletions.Get(candidate.Name, v)
+				d, _ = fileDeletions.Get([]byte(candidate.Name))
+				_ = v.Unmarshal(d)
 				if err := f.renameFile(candidate, *v, fi, dbUpdateChan, scanChan); err != nil {
 					// Failed to rename, try to handle files as separate
 					// deletions and updates.
@@ -479,7 +486,7 @@ nextFile:
 				}
 
 				// Remove the pending deletion (as we performed it by renaming)
-				fileDeletions.Delete(candidate.Name)
+				fileDeletions.Delete([]byte(candidate.Name))
 
 				changed++
 				f.queue.Done(fileName)
@@ -515,14 +522,14 @@ func (f *sendReceiveFolder) processDeletions(fileDeletions diskoverflow.Map, dir
 		}
 
 		v := &protocol.FileInfo{}
-		fit.Value(v)
+		_ = v.Unmarshal(fit.Value())
 		f.resetPullError(v.Name)
 		f.deleteFile(*v, dbUpdateChan, scanChan)
 	}
 	fit.Release()
 
-	dit := dirDeletions.NewReverseIterator()
-	for dit.Next() {
+	dit := dirDeletions.NewIterator()
+	for ok := dit.Last(); ok; ok = dit.Prev() {
 		select {
 		case <-f.ctx.Done():
 			break
@@ -530,7 +537,7 @@ func (f *sendReceiveFolder) processDeletions(fileDeletions diskoverflow.Map, dir
 		}
 
 		v := &protocol.FileInfo{}
-		dit.Value(v)
+		_ = v.Unmarshal(dit.Value())
 		f.resetPullError(v.Name)
 		l.Debugln(f, "Deleting dir", v.Name)
 		f.deleteDir(*v, dbUpdateChan, scanChan)

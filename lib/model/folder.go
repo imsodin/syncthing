@@ -119,6 +119,7 @@ func (f *folder) Serve() {
 	defer func() {
 		f.scanTimer.Stop()
 		f.setState(FolderIdle)
+		fmt.Println(f, "folder stopped")
 		close(f.stopped)
 	}()
 

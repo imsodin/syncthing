@@ -16,306 +16,84 @@ import (
 	"github.com/syndtr/goleveldb/leveldb/opt"
 )
 
-type Map interface {
-	Set(k string, v Value)
-	Get(k string, v Value) bool
-	Pop(k string, v Value) bool
-	Delete(k string)
-	NewIterator() MapIterator
-	Bytes() int
+type Common interface {
+	Get(k []byte) ([]byte, bool)
+	Pop(k []byte) ([]byte, bool)
+	Delete(k []byte)
+	NewIterator() iterator.Iterator
 	Items() int
-	SetOverflowBytes(bytes int)
 	Close()
 }
 
-type omap struct {
-	commonMap
-	base
+type Map interface {
+	Common
+	Set(k, v []byte)
 }
 
-type commonMap interface {
-	common
-	set(k string, v Value)
-	Get(k string, v Value) bool
-	Pop(k string, v Value) bool
-	Delete(k string)
-	newIterator(p iteratorParent) MapIterator
+type omap struct {
+	db       *leveldb.DB
+	items    int
+	location string
 }
 
 // NewMap returns an implementation of Map, spilling to disk at location.
-func NewMap(location string) Map {
-	o := &omap{base: newBase(location)}
-	o.commonMap = &memoryMap{
-		values: make(map[string]Value),
+func NewMap(location string, overflowBytes int) Map {
+	tmp, err := ioutil.TempDir(location, "overflow-")
+	errPanic(err)
+	db, err := leveldb.OpenFile(tmp, &opt.Options{
+		OpenFilesCacheCapacity: 10,
+		WriteBuffer:            overflowBytes,
+	})
+	errPanic(err)
+	return &omap{
+		db:       db,
+		location: tmp,
 	}
-	return o
 }
 
-func (o *omap) Set(k string, v Value) {
-	if o.iterating {
-		panic(concurrencyMsg)
+func (o *omap) Set(k, v []byte) {
+	_, ok := o.Get(k)
+	errPanic(o.db.Put(k, v, nil))
+	if !ok {
+		o.items++
 	}
-	if o.startSpilling(o.Bytes() + v.ProtoSize()) {
-		d, err := v.Marshal()
-		errPanic(err)
-		newMap := newDiskMap(o.location)
-		it := o.newIterator(o)
-		for it.Next() {
-			v.Reset()
-			it.Value(v)
-			newMap.set(it.Key(), v)
-		}
-		it.Release()
-		o.commonMap.Close()
-		o.commonMap = newMap
-		o.spilling = true
-		v.Reset()
-		errPanic(v.Unmarshal(d))
-	}
-	o.set(k, v)
 }
 
 func (o *omap) String() string {
 	return fmt.Sprintf("Map@%p", o)
 }
 
-// Close is just here to catch deferred calls to Close, such that the correct
-// method is called in case spilling happened.
 func (o *omap) Close() {
-	o.commonMap.Close()
-}
-
-func (o *omap) released() {
-	o.iterating = false
-}
-
-type MapIterator interface {
-	Iterator
-	Key() string
-}
-
-func (o *omap) NewIterator() MapIterator {
-	if o.iterating {
-		panic(concurrencyMsg)
-	}
-	return o.newIterator(o)
-}
-
-type memoryMap struct {
-	values map[string]Value
-	bytes  int
-}
-
-func (o *memoryMap) set(k string, v Value) {
-	if ov, ok := o.values[k]; ok {
-		o.bytes -= ov.ProtoSize()
-	}
-	o.values[k] = v
-	o.bytes += v.ProtoSize()
-}
-
-func (o *memoryMap) Bytes() int {
-	return o.bytes
-}
-
-func (o *memoryMap) Close() {
-	o.values = nil
-}
-
-func (o *memoryMap) Get(k string, v Value) bool {
-	nv, ok := o.values[k]
-	if !ok {
-		return false
-	}
-	copyValue(v, nv)
-	return true
-}
-
-func (o *memoryMap) Items() int {
-	return len(o.values)
-}
-
-func (o *memoryMap) Pop(k string, v Value) bool {
-	ok := o.Get(k, v)
-	if !ok {
-		return false
-	}
-	delete(o.values, k)
-	o.bytes -= v.ProtoSize()
-	return true
-}
-
-func (o *memoryMap) Delete(k string) {
-	v, ok := o.values[k]
-	if !ok {
-		return
-	}
-	delete(o.values, k)
-	o.bytes -= v.ProtoSize()
-}
-
-type iteratorValue struct {
-	k string
-	v Value
-}
-
-type memMapIterator struct {
-	values  map[string]Value
-	ch      chan iteratorValue
-	stop    chan struct{}
-	current iteratorValue
-	parent  iteratorParent
-}
-
-func (o *memoryMap) newIterator(p iteratorParent) MapIterator {
-	i := &memMapIterator{
-		ch:     make(chan iteratorValue),
-		stop:   make(chan struct{}),
-		parent: p,
-		values: o.values,
-	}
-	go i.iterate()
-	return i
-}
-
-func (i *memMapIterator) iterate() {
-	for k, v := range i.values {
-		select {
-		case <-i.stop:
-			break
-		case i.ch <- iteratorValue{k, v}:
-		}
-	}
-	close(i.ch)
-}
-
-func (i *memMapIterator) Key() string {
-	return i.current.k
-}
-
-func (i *memMapIterator) Value(v Value) {
-	copyValue(v, i.current.v)
-}
-
-func (i *memMapIterator) Next() bool {
-	var ok bool
-	i.current, ok = <-i.ch
-	return ok
-}
-
-func (i *memMapIterator) Release() {
-	close(i.stop)
-	i.parent.released()
-}
-
-type diskMap struct {
-	db    *leveldb.DB
-	bytes int
-	dir   string
-	len   int
-}
-
-func newDiskMap(location string) *diskMap {
-	// Use a temporary database directory.
-	tmp, err := ioutil.TempDir(location, "overflow-")
-	if err != nil {
-		panic("creating temporary directory: " + err.Error())
-	}
-	db, err := leveldb.OpenFile(tmp, &opt.Options{
-		OpenFilesCacheCapacity: 10,
-		WriteBuffer:            512 << 10,
-	})
-	if err != nil {
-		panic("creating temporary database: " + err.Error())
-	}
-	return &diskMap{
-		db:  db,
-		dir: tmp,
-	}
-}
-
-func (o *diskMap) set(k string, v Value) {
-	old, err := o.db.Get([]byte(k), nil)
-	o.addBytes([]byte(k), v)
-	o.bytes += v.ProtoSize()
-	if err == nil {
-		errPanic(v.Unmarshal(old))
-		o.bytes -= v.ProtoSize()
-	}
-}
-
-func (o *diskMap) addBytes(k []byte, v Value) {
-	d, err := v.Marshal()
-	errPanic(err)
-	errPanic(o.db.Put(k, d, nil))
-	o.len++
-}
-
-func (o *diskMap) Close() {
 	o.db.Close()
-	os.RemoveAll(o.dir)
+	os.RemoveAll(o.location)
 }
 
-func (o *diskMap) Bytes() int {
-	return o.bytes
-}
-
-func (o *diskMap) Get(k string, v Value) bool {
-	d, err := o.db.Get([]byte(k), nil)
-	if err != nil {
-		return false
+func (o *omap) Get(k []byte) ([]byte, bool) {
+	v, err := o.db.Get(k, nil)
+	if err == leveldb.ErrNotFound {
+		return nil, false
 	}
-	errPanic(v.Unmarshal(d))
-	return true
+	errPanic(err)
+	return v, true
 }
 
-func (o *diskMap) Items() int {
-	return o.len
+func (o *omap) Items() int {
+	return o.items
 }
 
-func (o *diskMap) Pop(k string, v Value) bool {
-	ok := o.Get(k, v)
+func (o *omap) Pop(k []byte) ([]byte, bool) {
+	v, ok := o.Get(k)
 	if ok {
-		errPanic(o.db.Delete([]byte(k), nil))
-		o.len--
+		o.Delete(k)
 	}
-	return ok
+	return v, ok
 }
 
-func (o *diskMap) Delete(k string) {
-	errPanic(o.db.Delete([]byte(k), nil))
-	o.len--
+func (o *omap) Delete(k []byte) {
+	errPanic(o.db.Delete(k, nil))
+	o.items--
 }
 
-func (o *diskMap) newIterator(p iteratorParent) MapIterator {
-	return &diskIterator{
-		it:     o.db.NewIterator(nil, nil),
-		parent: p,
-	}
-}
-
-type diskIterator struct {
-	it     iterator.Iterator
-	parent iteratorParent
-}
-
-func (i *diskIterator) Next() bool {
-	return i.it.Next()
-}
-
-func (i *diskIterator) Value(v Value) {
-	errPanic(v.Unmarshal(i.it.Value()))
-}
-
-func (i *diskIterator) key() []byte {
-	return i.it.Key()
-}
-
-func (i *diskIterator) Key() string {
-	return string(i.key())
-}
-
-func (i *diskIterator) Release() {
-	i.it.Release()
-	i.parent.released()
+func (o *omap) NewIterator() iterator.Iterator {
+	return o.db.NewIterator(nil, nil)
 }
