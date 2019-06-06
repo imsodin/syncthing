@@ -46,7 +46,7 @@ func (o *slice) Append(v Value) {
 	if o.startSpilling(o.Bytes() + v.ProtoSize()) {
 		d, err := v.Marshal()
 		errPanic(err)
-		ds := &diskSlice{newDiskSorted(o.location)}
+		ds := &diskSlice{newDiskMap(o.location)}
 		it := o.NewIterator()
 		for it.Next() {
 			v.Reset()
@@ -120,13 +120,13 @@ func (o *memorySlice) Items() int {
 }
 
 type diskSlice struct {
-	*diskSorted
+	*diskMap
 }
 
 func (o *diskSlice) append(v Value) {
-	o.diskSorted.add(nil, v)
+	o.diskMap.set(nil, v)
 }
 
 func (o *diskSlice) newIterator(p iteratorParent, reverse bool) Iterator {
-	return o.diskSorted.newIterator(p, reverse)
+	return o.diskMap.newIterator(p, reverse)
 }

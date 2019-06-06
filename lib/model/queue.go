@@ -18,7 +18,7 @@ import (
 
 type jobQueue struct {
 	progress       []string
-	queued         diskoverflow.Sorted
+	queued         diskoverflow.SortedMap
 	broughtToFront []string
 	handledAtFront map[string]struct{}
 	location       string
@@ -33,7 +33,7 @@ func newJobQueue(order config.PullOrder, loc string) *jobQueue {
 		order:          order,
 		mut:            sync.NewMutex(),
 	}
-	q.queued = diskoverflow.NewSorted(loc)
+	q.queued = diskoverflow.NewSortedMap(loc)
 	return q
 }
 
@@ -53,7 +53,7 @@ func (q *jobQueue) Push(file string, size int64, modified time.Time) {
 		key, _ = modified.MarshalText()
 	}
 	q.mut.Lock()
-	q.queued.Add(key, &queueValue{file})
+	q.queued.Set(key, &queueValue{file})
 	q.mut.Unlock()
 }
 

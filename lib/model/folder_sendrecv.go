@@ -270,7 +270,7 @@ func (f *sendReceiveFolder) pullerIteration(scanChan chan<- string) int {
 	}()
 
 	overflowLoc := locations.Get(locations.Database)
-	fileDeletions := diskoverflow.NewMap(overflowLoc)
+	fileDeletions := diskoverflow.NewSortedMap(overflowLoc)
 	dirDeletions := diskoverflow.NewSlice(overflowLoc)
 	changed, err := f.processNeeded(dbUpdateChan, copyChan, scanChan, fileDeletions, dirDeletions)
 
@@ -300,14 +300,14 @@ func (f *sendReceiveFolder) pullerIteration(scanChan chan<- string) int {
 	return changed
 }
 
-func (f *sendReceiveFolder) processNeeded(dbUpdateChan chan<- dbUpdateJob, copyChan chan<- copyBlocksState, scanChan chan<- string, fileDeletions diskoverflow.Map, dirDeletions diskoverflow.Slice) (int, error) {
+func (f *sendReceiveFolder) processNeeded(dbUpdateChan chan<- dbUpdateJob, copyChan chan<- copyBlocksState, scanChan chan<- string, fileDeletions diskoverflow.SortedMap, dirDeletions diskoverflow.Slice) (int, error) {
 	f.queueMut.Lock()
 	f.queue = newJobQueue(f.Order, locations.Get(locations.Database))
 	f.queueMut.Unlock()
 	defer f.queue.Close()
 
 	changed := 0
-	buckets := diskoverflow.NewMap(locations.Get(locations.Database))
+	buckets := diskoverflow.NewSortedMap(locations.Get(locations.Database))
 
 	// Iterate the list of items that we need and sort them into piles.
 	// Regular files to pull goes into the file queue, everything else
@@ -353,9 +353,9 @@ func (f *sendReceiveFolder) processNeeded(dbUpdateChan chan<- dbUpdateJob, copyC
 				// WithNeed, furthermore, the file can simply be of the wrong
 				// type if we haven't yet managed to pull it.
 				if ok && !df.IsDeleted() && !df.IsSymlink() && !df.IsDirectory() && !df.IsInvalid() {
-					fileDeletions.Set(file.Name, &file)
+					fileDeletions.Set([]byte(file.Name), &file)
 					// Put files into buckets per first hash
-					key := string(df.Blocks[0].Hash)
+					key := df.Blocks[0].Hash
 					v := &protocol.Index{}
 					if ok := buckets.Get(key, v); ok {
 						v.Files = append(v.Files, df)
@@ -453,7 +453,7 @@ nextFile:
 
 		// Check our list of files to be removed for a match, in which case
 		// we can just do a rename instead.
-		key := string(fi.Blocks[0].Hash)
+		key := fi.Blocks[0].Hash
 		var list []protocol.FileInfo
 		v := &protocol.Index{}
 		if ok := buckets.Get(key, v); ok {
@@ -471,7 +471,7 @@ nextFile:
 				// desired state with the delete bit set is in the deletion
 				// map.
 				v := &protocol.FileInfo{}
-				_ = fileDeletions.Get(candidate.Name, v)
+				_ = fileDeletions.Get([]byte(candidate.Name), v)
 				if err := f.renameFile(candidate, *v, fi, dbUpdateChan, scanChan); err != nil {
 					// Failed to rename, try to handle files as separate
 					// deletions and updates.
@@ -479,7 +479,7 @@ nextFile:
 				}
 
 				// Remove the pending deletion (as we performed it by renaming)
-				fileDeletions.Delete(candidate.Name)
+				fileDeletions.Delete([]byte(candidate.Name))
 
 				changed++
 				f.queue.Done(fileName)
@@ -504,7 +504,7 @@ nextFile:
 	return changed, nil
 }
 
-func (f *sendReceiveFolder) processDeletions(fileDeletions diskoverflow.Map, dirDeletions diskoverflow.Slice, dbUpdateChan chan<- dbUpdateJob, scanChan chan<- string) {
+func (f *sendReceiveFolder) processDeletions(fileDeletions diskoverflow.SortedMap, dirDeletions diskoverflow.Slice, dbUpdateChan chan<- dbUpdateJob, scanChan chan<- string) {
 	// Do not return early due to necessary cleanup
 	fit := fileDeletions.NewIterator()
 	for fit.Next() {
