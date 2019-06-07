@@ -140,8 +140,8 @@ func (q *jobQueue) Jobs() ([]string, []string) {
 	default:
 		it = q.queued.NewIterator()
 	}
-	v := &queueValue{}
 	for it.Next() {
+		v := &queueValue{}
 		it.Value(v)
 		f := v.string
 		if _, ok := atFront[f]; !ok {

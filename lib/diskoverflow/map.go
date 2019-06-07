@@ -18,6 +18,7 @@ import (
 )
 
 type SortedMap interface {
+	Common
 	Set(k []byte, v Value)
 	Get(k []byte, v Value) bool
 	Pop(k []byte, v Value) bool
@@ -26,10 +27,6 @@ type SortedMap interface {
 	Delete(k []byte)
 	NewIterator() MapIterator
 	NewReverseIterator() MapIterator
-	Bytes() int
-	Items() int
-	SetOverflowBytes(bytes int)
-	Close()
 }
 
 type sortedMap struct {
@@ -192,8 +189,9 @@ func (o *memMap) Delete(k []byte) {
 
 type memMapIterator struct {
 	*posIterator
-	keys   []string
-	values map[string]Value
+	lastKey string
+	keys    []string
+	values  map[string]Value
 }
 
 func (o *memMap) newIterator(reverse bool) MapIterator {
@@ -213,14 +211,17 @@ func (si *memMapIterator) Next() bool {
 		return false
 	}
 	// If items were removed from the map, their keys remained.
-	for _, ok := si.values[si.keys[si.pos()]]; !ok; _, ok = si.values[si.keys[si.pos()]] {
-		if si.offset == si.len-1 {
-			return false
+	for si.offset < si.len {
+		key := si.keys[si.pos()]
+		if key != si.lastKey {
+			if _, ok := si.values[key]; ok {
+				si.lastKey = key
+				return true
+			}
 		}
-		si.keys = append(si.keys[:si.pos()], si.keys[si.pos()+1:]...)
-		si.len--
+		si.offset++
 	}
-	return true
+	return false
 }
 
 func (si *memMapIterator) Value(v Value) {

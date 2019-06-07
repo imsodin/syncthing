@@ -12,13 +12,10 @@ import (
 )
 
 type Slice interface {
+	Common
 	Append(v Value)
 	NewIterator() Iterator
 	NewReverseIterator() Iterator
-	Bytes() int
-	Items() int
-	SetOverflowBytes(bytes int)
-	Close()
 }
 
 type slice struct {

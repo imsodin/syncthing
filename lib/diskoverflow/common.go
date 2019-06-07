@@ -49,6 +49,17 @@ type Value interface {
 	ProtoSize() int
 }
 
+// Common are the methods implemented by all container types.
+//
+// Close must be called to release resources. All iterations must be released
+// before calling Close.
+type Common interface {
+	Bytes() int
+	Items() int
+	SetOverflowBytes(bytes int)
+	Close()
+}
+
 // copyValue copies the content from src to dst. Src and dst must be pointers
 // to the same underlying types, otherwise this will panic.
 func copyValue(dst, src Value) {
