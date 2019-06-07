@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"sort"
 
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/iterator"
@@ -162,20 +163,28 @@ func (o *memoryMap) PopFirst(v Value) bool {
 	if o.Items() == 0 {
 		return false
 	}
+	if o.needsSorting {
+		sort.Strings(o.keys)
+		o.needsSorting = false
+	}
 	for _, ok := o.values[o.keys[0]]; !ok; _, ok = o.values[o.keys[0]] {
 		o.keys = o.keys[1:]
 	}
-	return o.Get([]byte(o.keys[0]), v)
+	return o.Pop([]byte(o.keys[0]), v)
 }
 
 func (o *memoryMap) PopLast(v Value) bool {
 	if o.Items() == 0 {
 		return false
 	}
+	if o.needsSorting {
+		sort.Strings(o.keys)
+		o.needsSorting = false
+	}
 	for _, ok := o.values[o.keys[len(o.keys)-1]]; !ok; _, ok = o.values[o.keys[len(o.keys)-1]] {
 		o.keys = o.keys[:len(o.keys)-1]
 	}
-	return o.Get([]byte(o.keys[len(o.keys)-1]), v)
+	return o.Pop([]byte(o.keys[len(o.keys)-1]), v)
 }
 
 func (o *memoryMap) Delete(k []byte) {
@@ -189,57 +198,46 @@ func (o *memoryMap) Delete(k []byte) {
 }
 
 type memMapIterator struct {
-	keys    []string
-	values  map[string]Value
-	len     int
-	offset  int
-	reverse bool
-	parent  iteratorParent
+	*posIterator
+	keys   []string
+	values map[string]Value
 }
 
 func (o *memoryMap) newIterator(p iteratorParent, reverse bool) MapIterator {
+	if o.needsSorting {
+		sort.Strings(o.keys)
+		o.needsSorting = false
+	}
 	return &memMapIterator{
-		keys:    o.keys,
-		values:  o.values,
-		len:     len(o.values),
-		offset:  -1,
-		reverse: reverse,
-		parent:  p,
+		posIterator: newPosIterator(p, len(o.keys), reverse),
+		keys:        o.keys,
+		values:      o.values,
 	}
-}
-
-func (si *memMapIterator) pos() int {
-	if !si.reverse {
-		return si.offset
-	}
-	return len(si.keys) - si.offset
 }
 
 func (si *memMapIterator) Next() bool {
-	if si.offset == si.len {
+	if !si.posIterator.Next() {
 		return false
 	}
-	si.offset++
 	// If items were removed from the map, their keys remained.
 	for _, ok := si.values[si.keys[si.pos()]]; !ok; _, ok = si.values[si.keys[si.pos()]] {
+		if si.offset == si.len-1 {
+			return false
+		}
 		si.keys = append(si.keys[:si.pos()], si.keys[si.pos()+1:]...)
+		si.len--
 	}
-
 	return true
 }
 
 func (si *memMapIterator) Value(v Value) {
-	if si.offset < si.len {
+	if si.offset >= 0 && si.offset < si.len {
 		copyValue(v, si.values[si.keys[si.pos()]])
 	}
 }
 
 func (si *memMapIterator) Key() []byte {
 	return []byte(si.keys[si.pos()])
-}
-
-func (si *memMapIterator) Release() {
-	si.parent.released()
 }
 
 type diskMap struct {
@@ -269,20 +267,16 @@ func newDiskMap(location string) *diskMap {
 }
 
 func (o *diskMap) set(k []byte, v Value) {
-	old, err := o.db.Get([]byte(k), nil)
-	o.addBytes([]byte(k), v)
-	o.bytes += v.ProtoSize()
-	if err == nil {
-		errPanic(v.Unmarshal(old))
-		o.bytes -= v.ProtoSize()
-	}
-}
-
-func (o *diskMap) addBytes(k []byte, v Value) {
+	old, oldErr := o.db.Get([]byte(k), nil)
 	d, err := v.Marshal()
 	errPanic(err)
 	errPanic(o.db.Put(k, d, nil))
 	o.len++
+	o.bytes += v.ProtoSize()
+	if oldErr == nil {
+		errPanic(v.Unmarshal(old))
+		o.bytes -= v.ProtoSize()
+	}
 }
 
 func (o *diskMap) Close() {

@@ -7,6 +7,7 @@
 package diskoverflow
 
 import (
+	"encoding/binary"
 	"fmt"
 )
 
@@ -111,8 +112,22 @@ func (o *memorySlice) Close() {
 	o.values = nil
 }
 
+type sliceIterator struct {
+	*posIterator
+	values []Value
+}
+
 func (o *memorySlice) newIterator(p iteratorParent, reverse bool) Iterator {
-	return newMemIterator(o.values, p, reverse, len(o.values))
+	return &sliceIterator{
+		posIterator: newPosIterator(p, len(o.values), reverse),
+		values:      o.values,
+	}
+}
+
+func (si *sliceIterator) Value(v Value) {
+	if si.offset < si.len {
+		copyValue(v, si.values[si.pos()])
+	}
 }
 
 func (o *memorySlice) Items() int {
@@ -123,8 +138,12 @@ type diskSlice struct {
 	*diskMap
 }
 
+const indexLength = 8
+
 func (o *diskSlice) append(v Value) {
-	o.diskMap.set(nil, v)
+	index := make([]byte, indexLength)
+	binary.BigEndian.PutUint64(index, uint64(o.Items()))
+	o.diskMap.set(index, v)
 }
 
 func (o *diskSlice) newIterator(p iteratorParent, reverse bool) Iterator {

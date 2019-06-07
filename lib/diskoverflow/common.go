@@ -99,51 +99,38 @@ type iteratorParent interface {
 	released()
 }
 
-type memIterator struct {
-	values  []Value
-	pos     int
+type posIterator struct {
 	len     int
+	offset  int
 	reverse bool
 	parent  iteratorParent
 }
 
-func newMemIterator(values []Value, p iteratorParent, reverse bool, len int) *memIterator {
-	it := &memIterator{
-		values:  values,
-		len:     len,
+func newPosIterator(p iteratorParent, l int, reverse bool) *posIterator {
+	return &posIterator{
+		len:     l,
+		offset:  -1,
 		reverse: reverse,
 		parent:  p,
 	}
-	if reverse {
-		it.pos = len
-	} else {
-		it.pos = -1
-	}
-	return it
 }
 
-func (si *memIterator) Next() bool {
-	if si.reverse {
-		if si.pos == 0 {
-			return false
-		}
-		si.pos--
-		return true
+func (si *posIterator) pos() int {
+	if !si.reverse {
+		return si.offset
 	}
-	if si.pos == si.len-1 {
+	return si.len - si.offset - 1
+}
+
+func (si *posIterator) Next() bool {
+	if si.offset == si.len-1 {
 		return false
 	}
-	si.pos++
+	si.offset++
 	return true
 }
 
-func (si *memIterator) Value(v Value) {
-	if si.pos != si.len && si.pos != -1 {
-		copyValue(v, si.values[si.pos])
-	}
-}
-
-func (si *memIterator) Release() {
+func (si *posIterator) Release() {
 	si.parent.released()
 }
 
