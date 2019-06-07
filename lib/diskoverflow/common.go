@@ -17,8 +17,6 @@ import (
 	"github.com/syncthing/syncthing/lib/protocol"
 )
 
-const concurrencyMsg = "iteration in progress - don't modify or start a new iteration concurrently"
-
 const OrigDefaultOverflowBytes = 16 << protocol.MiB
 
 var (
@@ -69,7 +67,6 @@ type base struct {
 	location      string
 	overflowBytes int
 	spilling      bool
-	iterating     bool
 }
 
 func newBase(location string) base {
@@ -95,23 +92,17 @@ type Iterator interface {
 	Value(Value)
 }
 
-type iteratorParent interface {
-	released()
-}
-
 type posIterator struct {
 	len     int
 	offset  int
 	reverse bool
-	parent  iteratorParent
 }
 
-func newPosIterator(p iteratorParent, l int, reverse bool) *posIterator {
+func newPosIterator(l int, reverse bool) *posIterator {
 	return &posIterator{
 		len:     l,
 		offset:  -1,
 		reverse: reverse,
-		parent:  p,
 	}
 }
 
@@ -130,9 +121,7 @@ func (si *posIterator) Next() bool {
 	return true
 }
 
-func (si *posIterator) Release() {
-	si.parent.released()
-}
+func (si *posIterator) Release() {}
 
 func errPanic(err error) {
 	if err != nil {

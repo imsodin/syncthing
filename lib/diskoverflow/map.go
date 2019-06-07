@@ -32,9 +32,9 @@ type SortedMap interface {
 	Close()
 }
 
-type omap struct {
-	commonMap
+type sortedMap struct {
 	base
+	commonMap
 }
 
 type commonMap interface {
@@ -45,27 +45,24 @@ type commonMap interface {
 	PopFirst(v Value) bool
 	PopLast(v Value) bool
 	Delete(k []byte)
-	newIterator(p iteratorParent, reverse bool) MapIterator
+	newIterator(reverse bool) MapIterator
 }
 
-// NewMap returns an implementation of Map, spilling to disk at location.
+// NewSortedMap returns an implementation of Map, spilling to disk at location.
 func NewSortedMap(location string) SortedMap {
-	o := &omap{base: newBase(location)}
-	o.commonMap = &memoryMap{
+	o := &sortedMap{base: newBase(location)}
+	o.commonMap = &memMap{
 		values: make(map[string]Value),
 	}
 	return o
 }
 
-func (o *omap) Set(k []byte, v Value) {
-	if o.iterating {
-		panic(concurrencyMsg)
-	}
+func (o *sortedMap) Set(k []byte, v Value) {
 	if o.startSpilling(o.Bytes() + v.ProtoSize()) {
 		d, err := v.Marshal()
 		errPanic(err)
 		newMap := newDiskMap(o.location)
-		it := o.newIterator(o, false)
+		it := o.newIterator(false)
 		for it.Next() {
 			v.Reset()
 			it.Value(v)
@@ -81,18 +78,14 @@ func (o *omap) Set(k []byte, v Value) {
 	o.set(k, v)
 }
 
-func (o *omap) String() string {
-	return fmt.Sprintf("Map@%p", o)
+func (o *sortedMap) String() string {
+	return fmt.Sprintf("SortedMap@%p", o)
 }
 
 // Close is just here to catch deferred calls to Close, such that the correct
 // method is called in case spilling happened.
-func (o *omap) Close() {
+func (o *sortedMap) Close() {
 	o.commonMap.Close()
-}
-
-func (o *omap) released() {
-	o.iterating = false
 }
 
 type MapIterator interface {
@@ -100,15 +93,15 @@ type MapIterator interface {
 	Key() []byte
 }
 
-func (o *omap) NewIterator() MapIterator {
-	return o.newIterator(o, false)
+func (o *sortedMap) NewIterator() MapIterator {
+	return o.newIterator(false)
 }
 
-func (o *omap) NewReverseIterator() MapIterator {
-	return o.newIterator(o, true)
+func (o *sortedMap) NewReverseIterator() MapIterator {
+	return o.newIterator(true)
 }
 
-type memoryMap struct {
+type memMap struct {
 	needsSorting bool
 	lastIndex    int
 	keys         []string
@@ -116,7 +109,7 @@ type memoryMap struct {
 	bytes        int
 }
 
-func (o *memoryMap) set(k []byte, v Value) {
+func (o *memMap) set(k []byte, v Value) {
 	s := string(k)
 	if ov, ok := o.values[s]; ok {
 		o.bytes -= ov.ProtoSize()
@@ -128,15 +121,15 @@ func (o *memoryMap) set(k []byte, v Value) {
 	o.bytes += v.ProtoSize()
 }
 
-func (o *memoryMap) Bytes() int {
+func (o *memMap) Bytes() int {
 	return o.bytes
 }
 
-func (o *memoryMap) Close() {
+func (o *memMap) Close() {
 	o.values = nil
 }
 
-func (o *memoryMap) Get(k []byte, v Value) bool {
+func (o *memMap) Get(k []byte, v Value) bool {
 	nv, ok := o.values[string(k)]
 	if !ok {
 		return false
@@ -145,11 +138,11 @@ func (o *memoryMap) Get(k []byte, v Value) bool {
 	return true
 }
 
-func (o *memoryMap) Items() int {
+func (o *memMap) Items() int {
 	return len(o.values)
 }
 
-func (o *memoryMap) Pop(k []byte, v Value) bool {
+func (o *memMap) Pop(k []byte, v Value) bool {
 	ok := o.Get(k, v)
 	if !ok {
 		return false
@@ -159,7 +152,7 @@ func (o *memoryMap) Pop(k []byte, v Value) bool {
 	return true
 }
 
-func (o *memoryMap) PopFirst(v Value) bool {
+func (o *memMap) PopFirst(v Value) bool {
 	if o.Items() == 0 {
 		return false
 	}
@@ -173,7 +166,7 @@ func (o *memoryMap) PopFirst(v Value) bool {
 	return o.Pop([]byte(o.keys[0]), v)
 }
 
-func (o *memoryMap) PopLast(v Value) bool {
+func (o *memMap) PopLast(v Value) bool {
 	if o.Items() == 0 {
 		return false
 	}
@@ -187,7 +180,7 @@ func (o *memoryMap) PopLast(v Value) bool {
 	return o.Pop([]byte(o.keys[len(o.keys)-1]), v)
 }
 
-func (o *memoryMap) Delete(k []byte) {
+func (o *memMap) Delete(k []byte) {
 	s := string(k)
 	v, ok := o.values[s]
 	if !ok {
@@ -203,13 +196,13 @@ type memMapIterator struct {
 	values map[string]Value
 }
 
-func (o *memoryMap) newIterator(p iteratorParent, reverse bool) MapIterator {
+func (o *memMap) newIterator(reverse bool) MapIterator {
 	if o.needsSorting {
 		sort.Strings(o.keys)
 		o.needsSorting = false
 	}
 	return &memMapIterator{
-		posIterator: newPosIterator(p, len(o.keys), reverse),
+		posIterator: newPosIterator(len(o.keys), reverse),
 		keys:        o.keys,
 		values:      o.values,
 	}
@@ -342,48 +335,27 @@ func (o *diskMap) Delete(k []byte) {
 	o.len--
 }
 
-func (o *diskMap) newIterator(p iteratorParent, reverse bool) MapIterator {
-	di := &diskIterator{
-		it:     o.db.NewIterator(nil, nil),
-		parent: p,
-	}
+func (o *diskMap) newIterator(reverse bool) MapIterator {
+	di := &diskIterator{o.db.NewIterator(nil, nil)}
 	if !reverse {
 		return di
 	}
 	ri := &diskReverseIterator{diskIterator: di}
 	ri.next = func(i *diskReverseIterator) bool {
 		i.next = func(j *diskReverseIterator) bool {
-			return j.it.Prev()
+			return j.Prev()
 		}
-		return i.it.Last()
+		return i.Last()
 	}
 	return ri
 }
 
 type diskIterator struct {
-	it     iterator.Iterator
-	parent iteratorParent
-}
-
-func (i *diskIterator) Next() bool {
-	return i.it.Next()
+	iterator.Iterator
 }
 
 func (i *diskIterator) Value(v Value) {
-	errPanic(v.Unmarshal(i.it.Value()))
-}
-
-func (i *diskIterator) key() []byte {
-	return i.it.Key()
-}
-
-func (i *diskIterator) Key() []byte {
-	return i.key()
-}
-
-func (i *diskIterator) Release() {
-	i.it.Release()
-	i.parent.released()
+	errPanic(v.Unmarshal(i.Iterator.Value()))
 }
 
 type diskReverseIterator struct {
