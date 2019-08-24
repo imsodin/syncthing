@@ -104,7 +104,7 @@ type sendReceiveFolder struct {
 
 	queue *jobQueue
 
-	pullErrors    map[string]string // path -> error string
+	pullErrors    *errorTree // path -> error string
 	pullErrorsMut sync.Mutex
 }
 
@@ -1763,42 +1763,45 @@ func (f *sendReceiveFolder) newPullError(path string, err error) {
 	f.pullErrorsMut.Lock()
 	defer f.pullErrorsMut.Unlock()
 
-	// We might get more than one error report for a file (i.e. error on
-	// Write() followed by Close()); we keep the first error as that is
-	// probably closer to the root cause.
-	if _, ok := f.pullErrors[path]; ok {
-		return
-	}
-
-	l.Infof("Puller (folder %s, item %q): %v", f.Description(), path, err)
-
 	// Establish context to differentiate from errors while scanning.
 	// Use "syncing" as opposed to "pulling" as the latter might be used
 	// for errors occurring specificly in the puller routine.
-	f.pullErrors[path] = fmt.Sprintln("syncing:", err)
+	preexisting, parent := f.pullErrors.add(path, errors.Wrap(err, "syncing"))
+	if preexisting {
+		// We might get more than one error report for a file (i.e. error on
+		// Write() followed by Close()); we keep the first error as that is
+		// probably closer to the root cause.
+		return
+	}
+
+	msg := fmt.Sprintf("Puller (folder %s, item %q): %v", f.Description(), path, err)
+	if parent {
+		l.Debugln(msg)
+		return
+	}
+	l.Infoln(msg)
 }
 
 // resetPullError removes the error at path in case there was an error on a
 // previous pull iteration.
 func (f *sendReceiveFolder) resetPullError(path string) {
 	f.pullErrorsMut.Lock()
-	delete(f.pullErrors, path)
+	f.pullErrors.reset(path)
 	f.pullErrorsMut.Unlock()
 }
 
 func (f *sendReceiveFolder) clearPullErrors() {
 	f.pullErrorsMut.Lock()
-	f.pullErrors = make(map[string]string)
+	f.pullErrors = newErrorTree()
 	f.pullErrorsMut.Unlock()
 }
 
 func (f *sendReceiveFolder) Errors() []FileError {
 	scanErrors := f.folder.Errors()
 	f.pullErrorsMut.Lock()
-	errors := make([]FileError, 0, len(f.pullErrors)+len(f.scanErrors))
-	for path, err := range f.pullErrors {
-		errors = append(errors, FileError{path, err})
-	}
+	l.Infoln("Errors lenghts", f.pullErrors.length(), len(f.scanErrors), f.pullErrors.length()+len(f.scanErrors))
+	errors := make([]FileError, 0, f.pullErrors.length()+len(f.scanErrors))
+	f.pullErrors.fileErrorList(errors)
 	f.pullErrorsMut.Unlock()
 	errors = append(errors, scanErrors...)
 	sort.Sort(fileErrorList(errors))
@@ -2002,3 +2005,128 @@ func existingConflicts(name string, fs fs.Filesystem) []string {
 	}
 	return matches
 }
+
+type errorTree struct {
+	*errorNode
+	numErrors int
+}
+
+type errorNode struct {
+	err      error
+	children map[string]*errorNode
+}
+
+func newErrorTree() *errorTree {
+	return &errorTree{
+		errorNode: newErrorNode(nil),
+	}
+}
+
+func newErrorNode(err error) *errorNode {
+	return &errorNode{
+		err:      err,
+		children: make(map[string]*errorNode),
+	}
+}
+
+func (t *errorTree) length() int {
+	return t.numErrors
+}
+
+// add registers the error on a path, and firstly returns whether there was
+// already an error at the exact path and secondly, at any parent.
+func (t *errorTree) add(path string, err error) (bool, bool) {
+	l.Infoln("errorTree adding", path, err)
+	preexisting, parentErr := t.errorNode.add(strings.Split(path, string(fs.PathSeparator)), err)
+	if !preexisting {
+		l.Infoln("errorTree actually added", path, err)
+		t.numErrors++
+	}
+	return preexisting, parentErr
+}
+
+// fileErrorList appends all its errors to the given slice and expects that slice
+// to have the capacity to hold all these errors.
+func (t *errorTree) fileErrorList(errors []FileError) {
+	t.errorNode.fileErrorList("", errors)
+}
+
+func (t *errorNode) add(parts []string, err error) (bool, bool) {
+	l.Infoln("errorNode add", parts, err, t)
+	child, ok := t.children[parts[0]]
+	if len(parts) == 1 {
+		if ok {
+			if child.err != nil {
+				return true, t.err != nil
+			}
+			child.err = err
+			return false, t.err != nil
+		}
+		t.children[parts[0]] = newErrorNode(err)
+		return false, t.err != nil
+	}
+	if !ok {
+		child = newErrorNode(nil)
+		t.children[parts[0]] = child
+	}
+	preexisting, parentErr := child.add(parts[1:], err)
+	if !parentErr && t.err != nil {
+		return preexisting, true
+	}
+	return preexisting, parentErr
+}
+
+// fileErrorList appends all its errors to the given slice and expects that slice
+// to have the capacity to hold all these errors.
+func (t *errorNode) fileErrorList(path string, errors []FileError) {
+	if t.err != nil {
+		errors = append(errors, FileError{path, t.err.Error()})
+	}
+	for name, child := range t.children {
+		child.fileErrorList(filepath.Join(path, name), errors)
+	}
+}
+
+func (t *errorTree) reset(path string) {
+	l.Infoln("errorTree resetting", path)
+	if ok := t.errorNode.reset(strings.Split(path, string(fs.PathSeparator))); ok {
+		l.Infoln("errorTree actually reset", path)
+		t.numErrors--
+	}
+}
+
+// reset returns true if an error actually existed, that could be reset.
+func (t *errorNode) reset(parts []string) bool {
+	l.Infoln("errorNode resetting", parts)
+	child, ok := t.children[parts[0]]
+	if !ok {
+		return false
+	}
+	if len(parts) == 1 {
+		if len(child.children) == 0 {
+			delete(t.children, parts[0])
+			return true
+		}
+		if child.err != nil {
+			child.err = nil
+			return true
+		}
+		return false
+	}
+	reset := child.reset(parts[1:])
+	if reset && child.err == nil && len(child.children) == 0 {
+		delete(t.children, parts[0])
+	}
+	return reset
+}
+
+// func (t *errorNode) has(parts []string) bool {
+// 	child, ok := t.children[parts[0]]
+// 	if !ok {
+// 		return false
+// 	}
+// 	if len(parts) == 1 {
+// 		return true
+// 	}
+// 	return child.Has(parts[1])
+// }
