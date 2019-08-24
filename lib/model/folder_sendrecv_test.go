@@ -25,7 +25,6 @@ import (
 	"github.com/syncthing/syncthing/lib/ignore"
 	"github.com/syncthing/syncthing/lib/protocol"
 	"github.com/syncthing/syncthing/lib/scanner"
-	"github.com/syncthing/syncthing/lib/sync"
 )
 
 var blocks = []protocol.BlockInfo{
@@ -104,9 +103,8 @@ func setupSendReceiveFolder(files ...protocol.FileInfo) (*model, *sendReceiveFol
 			FolderConfiguration: fcfg,
 		},
 
-		queue:         newJobQueue(),
-		pullErrors:    newErrorTree(),
-		pullErrorsMut: sync.NewMutex(),
+		queue:      newJobQueue(),
+		pullErrors: newErrorTree(fcfg.Description()),
 	}
 	f.fs = fs.NewMtimeFS(f.Filesystem(), db.NewNamespacedKV(model.db, "mtime"))
 

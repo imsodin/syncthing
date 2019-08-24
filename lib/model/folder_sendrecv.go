@@ -104,17 +104,16 @@ type sendReceiveFolder struct {
 
 	queue *jobQueue
 
-	pullErrors    *errorTree // path -> error string
-	pullErrorsMut sync.Mutex
+	pullErrors *errorTree // path -> error
 }
 
 func newSendReceiveFolder(model *model, fset *db.FileSet, ignores *ignore.Matcher, cfg config.FolderConfiguration, ver versioner.Versioner, fs fs.Filesystem, evLogger events.Logger) service {
 	f := &sendReceiveFolder{
-		folder:        newFolder(model, fset, ignores, cfg, evLogger),
-		fs:            fs,
-		versioner:     ver,
-		queue:         newJobQueue(),
-		pullErrorsMut: sync.NewMutex(),
+		folder:     newFolder(model, fset, ignores, cfg, evLogger),
+		fs:         fs,
+		versioner:  ver,
+		queue:      newJobQueue(),
+		pullErrors: newErrorTree(cfg.Description()),
 	}
 	f.folder.puller = f
 	f.folder.Service = util.AsService(f.serve)
@@ -177,7 +176,7 @@ func (f *sendReceiveFolder) pull() bool {
 	l.Debugf("%v pulling", f)
 
 	f.setState(FolderSyncing)
-	f.clearPullErrors()
+	f.pullErrors.clear()
 
 	scanChan := make(chan string)
 	go f.pullScannerRoutine(scanChan)
@@ -201,7 +200,7 @@ func (f *sendReceiveFolder) pull() bool {
 		if changed == 0 {
 			// No files were changed by the puller, so we are in
 			// sync. Any errors were just transitional.
-			f.clearPullErrors()
+			f.pullErrors.clear()
 			return true
 		}
 	}
@@ -312,7 +311,7 @@ func (f *sendReceiveFolder) processNeeded(dbUpdateChan chan<- dbUpdateJob, copyC
 		}
 
 		if f.IgnoreDelete && intf.IsDeleted() {
-			f.resetPullError(intf.FileName())
+			f.pullErrors.reset(intf.FileName())
 			l.Debugln(f, "ignore file deletion (config)", intf.FileName())
 			return true
 		}
@@ -321,7 +320,7 @@ func (f *sendReceiveFolder) processNeeded(dbUpdateChan chan<- dbUpdateJob, copyC
 
 		switch {
 		case f.ignores.ShouldIgnore(file.Name):
-			f.resetPullError(file.Name)
+			f.pullErrors.reset(file.Name)
 			file.SetIgnored(f.shortID)
 			l.Debugln(f, "Handling ignored file", file)
 			dbUpdateChan <- dbUpdateJob{file, dbUpdateInvalidate}
@@ -337,7 +336,7 @@ func (f *sendReceiveFolder) processNeeded(dbUpdateChan chan<- dbUpdateJob, copyC
 				changed++
 			} else {
 				// We can't pull an invalid file.
-				f.newPullError(file.Name, fs.ErrInvalidFilename)
+				f.pullErrors.add(file.Name, fs.ErrInvalidFilename)
 			}
 
 		case file.IsDeleted():
@@ -377,7 +376,7 @@ func (f *sendReceiveFolder) processNeeded(dbUpdateChan chan<- dbUpdateJob, copyC
 			}
 
 		case runtime.GOOS == "windows" && file.IsSymlink():
-			f.resetPullError(file.Name)
+			f.pullErrors.reset(file.Name)
 			file.SetUnsupported(f.shortID)
 			l.Debugln(f, "Invalidating symlink (unsupported)", file.Name)
 			dbUpdateChan <- dbUpdateJob{file, dbUpdateInvalidate}
@@ -443,7 +442,7 @@ nextFile:
 			break
 		}
 
-		f.resetPullError(fileName)
+		f.pullErrors.reset(fileName)
 
 		fi, ok := f.fset.GetGlobal(fileName)
 		if !ok {
@@ -502,7 +501,7 @@ nextFile:
 				continue nextFile
 			}
 		}
-		f.newPullError(fileName, errNotAvailable)
+		f.pullErrors.add(fileName, errNotAvailable)
 		f.queue.Done(fileName)
 	}
 
@@ -517,7 +516,7 @@ func (f *sendReceiveFolder) processDeletions(fileDeletions map[string]protocol.F
 		default:
 		}
 
-		f.resetPullError(file.Name)
+		f.pullErrors.reset(file.Name)
 		f.deleteFile(file, dbUpdateChan, scanChan)
 	}
 
@@ -530,7 +529,7 @@ func (f *sendReceiveFolder) processDeletions(fileDeletions map[string]protocol.F
 		}
 
 		dir := dirDeletions[len(dirDeletions)-i-1]
-		f.resetPullError(dir.Name)
+		f.pullErrors.reset(dir.Name)
 		l.Debugln(f, "Deleting dir", dir.Name)
 		f.deleteDir(dir, dbUpdateChan, scanChan)
 	}
@@ -542,7 +541,7 @@ func (f *sendReceiveFolder) handleDir(file protocol.FileInfo, dbUpdateChan chan<
 	// care not declare another err.
 	var err error
 
-	f.resetPullError(file.Name)
+	f.pullErrors.reset(file.Name)
 
 	f.evLogger.Log(events.ItemStarted, map[string]string{
 		"folder": f.folderID,
@@ -581,7 +580,7 @@ func (f *sendReceiveFolder) handleDir(file protocol.FileInfo, dbUpdateChan chan<
 		curFile, hasCurFile := f.model.CurrentFolderFile(f.folderID, file.Name)
 		if err := f.scanIfItemChanged(info, curFile, hasCurFile, scanChan); err != nil {
 			err = errors.Wrap(err, "handling dir")
-			f.newPullError(file.Name, err)
+			f.pullErrors.add(file.Name, err)
 			return
 		}
 
@@ -601,7 +600,7 @@ func (f *sendReceiveFolder) handleDir(file protocol.FileInfo, dbUpdateChan chan<
 			err = f.deleteItemOnDisk(curFile, scanChan)
 		}
 		if err != nil {
-			f.newPullError(file.Name, err)
+			f.pullErrors.add(file.Name, err)
 			return
 		}
 		fallthrough
@@ -636,13 +635,13 @@ func (f *sendReceiveFolder) handleDir(file protocol.FileInfo, dbUpdateChan chan<
 		if err = f.inWritableDir(mkdir, file.Name); err == nil {
 			dbUpdateChan <- dbUpdateJob{file, dbUpdateHandleDir}
 		} else {
-			f.newPullError(file.Name, errors.Wrap(err, "creating directory"))
+			f.pullErrors.add(file.Name, errors.Wrap(err, "creating directory"))
 		}
 		return
 	// Weird error when stat()'ing the dir. Probably won't work to do
 	// anything else with it if we can't even stat() it.
 	case err != nil:
-		f.newPullError(file.Name, errors.Wrap(err, "checking file to be replaced"))
+		f.pullErrors.add(file.Name, errors.Wrap(err, "checking file to be replaced"))
 		return
 	}
 
@@ -651,7 +650,7 @@ func (f *sendReceiveFolder) handleDir(file protocol.FileInfo, dbUpdateChan chan<
 	// It's OK to change mode bits on stuff within non-writable directories.
 	if !f.IgnorePerms && !file.NoPermissions {
 		if err := f.fs.Chmod(file.Name, mode|(fs.FileMode(info.Mode())&retainBits)); err != nil {
-			f.newPullError(file.Name, err)
+			f.pullErrors.add(file.Name, err)
 			return
 		}
 	}
@@ -664,7 +663,7 @@ func (f *sendReceiveFolder) checkParent(file string, scanChan chan<- string) boo
 	parent := filepath.Dir(file)
 
 	if err := osutil.TraversesSymlink(f.fs, parent); err != nil {
-		f.newPullError(file, errors.Wrap(err, "checking parent dirs"))
+		f.pullErrors.add(file, errors.Wrap(err, "checking parent dirs"))
 		return false
 	}
 
@@ -685,7 +684,7 @@ func (f *sendReceiveFolder) checkParent(file string, scanChan chan<- string) boo
 	}
 	l.Debugf("%v resurrecting parent directory of %v", f, file)
 	if err := f.fs.MkdirAll(parent, 0755); err != nil {
-		f.newPullError(file, errors.Wrap(err, "resurrecting parent dir"))
+		f.pullErrors.add(file, errors.Wrap(err, "resurrecting parent dir"))
 		return false
 	}
 	scanChan <- parent
@@ -698,7 +697,7 @@ func (f *sendReceiveFolder) handleSymlink(file protocol.FileInfo, dbUpdateChan c
 	// care not declare another err.
 	var err error
 
-	f.resetPullError(file.Name)
+	f.pullErrors.reset(file.Name)
 
 	f.evLogger.Log(events.ItemStarted, map[string]string{
 		"folder": f.folderID,
@@ -725,7 +724,7 @@ func (f *sendReceiveFolder) handleSymlink(file protocol.FileInfo, dbUpdateChan c
 	if len(file.SymlinkTarget) == 0 {
 		// Index entry from a Syncthing predating the support for including
 		// the link target in the index entry. We log this as an error.
-		f.newPullError(file.Name, errIncompatibleSymlink)
+		f.pullErrors.add(file.Name, errIncompatibleSymlink)
 		return
 	}
 
@@ -735,7 +734,7 @@ func (f *sendReceiveFolder) handleSymlink(file protocol.FileInfo, dbUpdateChan c
 		curFile, hasCurFile := f.model.CurrentFolderFile(f.folderID, file.Name)
 		if err := f.scanIfItemChanged(info, curFile, hasCurFile, scanChan); err != nil {
 			err = errors.Wrap(err, "handling symlink")
-			f.newPullError(file.Name, err)
+			f.pullErrors.add(file.Name, err)
 			return
 		}
 		// Remove it to replace with the symlink. This also handles the
@@ -755,7 +754,7 @@ func (f *sendReceiveFolder) handleSymlink(file protocol.FileInfo, dbUpdateChan c
 			err = f.deleteItemOnDisk(curFile, scanChan)
 		}
 		if err != nil {
-			f.newPullError(file.Name, errors.Wrap(err, "symlink remove"))
+			f.pullErrors.add(file.Name, errors.Wrap(err, "symlink remove"))
 			return
 		}
 	}
@@ -772,7 +771,7 @@ func (f *sendReceiveFolder) handleSymlink(file protocol.FileInfo, dbUpdateChan c
 	if err = f.inWritableDir(createLink, file.Name); err == nil {
 		dbUpdateChan <- dbUpdateJob{file, dbUpdateHandleSymlink}
 	} else {
-		f.newPullError(file.Name, errors.Wrap(err, "symlink create"))
+		f.pullErrors.add(file.Name, errors.Wrap(err, "symlink create"))
 	}
 }
 
@@ -800,7 +799,7 @@ func (f *sendReceiveFolder) deleteDir(file protocol.FileInfo, dbUpdateChan chan<
 	}()
 
 	if err = f.deleteDirOnDisk(file.Name, scanChan); err != nil {
-		f.newPullError(file.Name, errors.Wrap(err, "delete dir"))
+		f.pullErrors.add(file.Name, errors.Wrap(err, "delete dir"))
 		return
 	}
 
@@ -820,7 +819,7 @@ func (f *sendReceiveFolder) deleteFileWithCurrent(file, cur protocol.FileInfo, h
 
 	l.Debugln(f, "Deleting file", file.Name)
 
-	f.resetPullError(file.Name)
+	f.pullErrors.reset(file.Name)
 
 	f.evLogger.Log(events.ItemStarted, map[string]string{
 		"folder": f.folderID,
@@ -831,7 +830,7 @@ func (f *sendReceiveFolder) deleteFileWithCurrent(file, cur protocol.FileInfo, h
 
 	defer func() {
 		if err != nil {
-			f.newPullError(file.Name, errors.Wrap(err, "delete file"))
+			f.pullErrors.add(file.Name, errors.Wrap(err, "delete file"))
 		}
 		f.evLogger.Log(events.ItemFinished, map[string]interface{}{
 			"folder": f.folderID,
@@ -1167,7 +1166,7 @@ func populateOffsets(blocks []protocol.BlockInfo) {
 func (f *sendReceiveFolder) shortcutFile(file, curFile protocol.FileInfo, dbUpdateChan chan<- dbUpdateJob) {
 	l.Debugln(f, "taking shortcut on", file.Name)
 
-	f.resetPullError(file.Name)
+	f.pullErrors.reset(file.Name)
 
 	f.evLogger.Log(events.ItemStarted, map[string]string{
 		"folder": f.folderID,
@@ -1189,7 +1188,7 @@ func (f *sendReceiveFolder) shortcutFile(file, curFile protocol.FileInfo, dbUpda
 
 	if !f.IgnorePerms && !file.NoPermissions {
 		if err = f.fs.Chmod(file.Name, fs.FileMode(file.Permissions&0777)); err != nil {
-			f.newPullError(file.Name, err)
+			f.pullErrors.add(file.Name, err)
 			return
 		}
 	}
@@ -1508,7 +1507,7 @@ func (f *sendReceiveFolder) performFinish(file, curFile protocol.FileInfo, hasCu
 
 		if err := f.scanIfItemChanged(stat, curFile, hasCurFile, scanChan); err != nil {
 			err = errors.Wrap(err, "handling file")
-			f.newPullError(file.Name, err)
+			f.pullErrors.add(file.Name, err)
 			return err
 		}
 
@@ -1557,7 +1556,7 @@ func (f *sendReceiveFolder) finisherRoutine(in <-chan *sharedPullerState, dbUpda
 			}
 
 			if err != nil {
-				f.newPullError(state.file.Name, err)
+				f.pullErrors.add(state.file.Name, err)
 			} else {
 				blockStatsMut.Lock()
 				blockStats["total"] += state.reused + state.copyTotal + state.pullTotal
@@ -1759,50 +1758,11 @@ func (f *sendReceiveFolder) moveForConflict(name, lastModBy string, scanChan cha
 	return err
 }
 
-func (f *sendReceiveFolder) newPullError(path string, err error) {
-	f.pullErrorsMut.Lock()
-	defer f.pullErrorsMut.Unlock()
-
-	// Establish context to differentiate from errors while scanning.
-	// Use "syncing" as opposed to "pulling" as the latter might be used
-	// for errors occurring specificly in the puller routine.
-	preexisting, parent := f.pullErrors.add(path, errors.Wrap(err, "syncing"))
-	if preexisting {
-		// We might get more than one error report for a file (i.e. error on
-		// Write() followed by Close()); we keep the first error as that is
-		// probably closer to the root cause.
-		return
-	}
-
-	msg := fmt.Sprintf("Puller (folder %s, item %q): %v", f.Description(), path, err)
-	if parent {
-		l.Debugln(msg)
-		return
-	}
-	l.Infoln(msg)
-}
-
-// resetPullError removes the error at path in case there was an error on a
-// previous pull iteration.
-func (f *sendReceiveFolder) resetPullError(path string) {
-	f.pullErrorsMut.Lock()
-	f.pullErrors.reset(path)
-	f.pullErrorsMut.Unlock()
-}
-
-func (f *sendReceiveFolder) clearPullErrors() {
-	f.pullErrorsMut.Lock()
-	f.pullErrors = newErrorTree()
-	f.pullErrorsMut.Unlock()
-}
-
 func (f *sendReceiveFolder) Errors() []FileError {
 	scanErrors := f.folder.Errors()
-	f.pullErrorsMut.Lock()
 	l.Infoln("Errors lenghts", f.pullErrors.length(), len(f.scanErrors), f.pullErrors.length()+len(f.scanErrors))
 	errors := make([]FileError, 0, f.pullErrors.length()+len(f.scanErrors))
 	f.pullErrors.fileErrorList(errors)
-	f.pullErrorsMut.Unlock()
 	errors = append(errors, scanErrors...)
 	sort.Sort(fileErrorList(errors))
 	return errors
@@ -2008,7 +1968,10 @@ func existingConflicts(name string, fs fs.Filesystem) []string {
 
 type errorTree struct {
 	*errorNode
-	numErrors int
+	folder       string
+	notAvailable bool
+	numErrors    int
+	mut          sync.Mutex
 }
 
 type errorNode struct {
@@ -2016,9 +1979,11 @@ type errorNode struct {
 	children map[string]*errorNode
 }
 
-func newErrorTree() *errorTree {
+func newErrorTree(folder string) *errorTree {
 	return &errorTree{
 		errorNode: newErrorNode(nil),
+		folder:    folder,
+		mut:       sync.NewMutex(),
 	}
 }
 
@@ -2030,29 +1995,70 @@ func newErrorNode(err error) *errorNode {
 }
 
 func (t *errorTree) length() int {
+	t.mut.Lock()
+	defer t.mut.Unlock()
 	return t.numErrors
 }
 
 // add registers the error on a path, and firstly returns whether there was
 // already an error at the exact path and secondly, at any parent.
-func (t *errorTree) add(path string, err error) (bool, bool) {
-	l.Infoln("errorTree adding", path, err)
-	preexisting, parentErr := t.errorNode.add(strings.Split(path, string(fs.PathSeparator)), err)
-	if !preexisting {
-		l.Infoln("errorTree actually added", path, err)
-		t.numErrors++
+func (t *errorTree) add(path string, err error) {
+	t.mut.Lock()
+	defer t.mut.Unlock()
+
+	// Establish context to differentiate from errors while scanning.
+	// Use "syncing" as opposed to "pulling" as the latter might be used
+	// for errors occurring specificly in the puller routine.
+	preexisting, parentErr := t.errorNode.add(strings.Split(path, string(fs.PathSeparator)), errors.Wrap(err, "syncing"))
+	if preexisting {
+		// We might get more than one error report for a file (i.e. error on
+		// Write() followed by Close()); we keep the first error as that is
+		// probably closer to the root cause.
+		return
 	}
-	return preexisting, parentErr
+
+	t.numErrors++
+
+	msg := fmt.Sprintf("Puller (folder %s, item %q): %v", t.folder, path, err)
+	switch {
+	case errors.Cause(err) == errNotAvailable:
+		t.notAvailable = true
+		fallthrough
+	case parentErr:
+		l.Debugln(msg)
+		return
+	}
+	l.Infoln(msg)
+}
+
+func (t *errorTree) reset(path string) {
+	t.mut.Lock()
+	defer t.mut.Unlock()
+
+	if ok := t.errorNode.reset(strings.Split(path, string(fs.PathSeparator))); ok {
+		t.numErrors--
+	}
+}
+
+func (t *errorTree) clear() {
+	if t.notAvailable {
+		l.Infof("Puller (folder %s): some items failed due to: %v", t.folder, errNotAvailable)
+		t.notAvailable = false
+	}
+	t.numErrors = 0
+	t.errorNode = newErrorNode(nil)
 }
 
 // fileErrorList appends all its errors to the given slice and expects that slice
 // to have the capacity to hold all these errors.
 func (t *errorTree) fileErrorList(errors []FileError) {
+	t.mut.Lock()
+	defer t.mut.Unlock()
+
 	t.errorNode.fileErrorList("", errors)
 }
 
 func (t *errorNode) add(parts []string, err error) (bool, bool) {
-	l.Infoln("errorNode add", parts, err, t)
 	child, ok := t.children[parts[0]]
 	if len(parts) == 1 {
 		if ok {
@@ -2076,28 +2082,8 @@ func (t *errorNode) add(parts []string, err error) (bool, bool) {
 	return preexisting, parentErr
 }
 
-// fileErrorList appends all its errors to the given slice and expects that slice
-// to have the capacity to hold all these errors.
-func (t *errorNode) fileErrorList(path string, errors []FileError) {
-	if t.err != nil {
-		errors = append(errors, FileError{path, t.err.Error()})
-	}
-	for name, child := range t.children {
-		child.fileErrorList(filepath.Join(path, name), errors)
-	}
-}
-
-func (t *errorTree) reset(path string) {
-	l.Infoln("errorTree resetting", path)
-	if ok := t.errorNode.reset(strings.Split(path, string(fs.PathSeparator))); ok {
-		l.Infoln("errorTree actually reset", path)
-		t.numErrors--
-	}
-}
-
 // reset returns true if an error actually existed, that could be reset.
 func (t *errorNode) reset(parts []string) bool {
-	l.Infoln("errorNode resetting", parts)
 	child, ok := t.children[parts[0]]
 	if !ok {
 		return false
@@ -2120,13 +2106,11 @@ func (t *errorNode) reset(parts []string) bool {
 	return reset
 }
 
-// func (t *errorNode) has(parts []string) bool {
-// 	child, ok := t.children[parts[0]]
-// 	if !ok {
-// 		return false
-// 	}
-// 	if len(parts) == 1 {
-// 		return true
-// 	}
-// 	return child.Has(parts[1])
-// }
+func (t *errorNode) fileErrorList(path string, errors []FileError) {
+	if t.err != nil {
+		errors = append(errors, FileError{path, t.err.Error()})
+	}
+	for name, child := range t.children {
+		child.fileErrorList(filepath.Join(path, name), errors)
+	}
+}
