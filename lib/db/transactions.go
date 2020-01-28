@@ -313,11 +313,9 @@ func (t *readOnlyTransaction) availability(folder, file []byte) ([]protocol.Devi
 	return devices, nil
 }
 
-func (t *readOnlyTransaction) withNeed(folder, device []byte, truncate bool, fn Iterator) error {
-	if bytes.Equal(device, protocol.LocalDeviceID[:]) {
-		return t.withNeedLocal(folder, truncate, fn)
-	}
-
+// withNeedDeprecated is "the old way" of determining needed files, which is now
+// only used anymore for the db transition to "the new way".
+func (t *readOnlyTransaction) withNeedDeprecated(folder, device []byte, truncate bool, fn Iterator) error {
 	key, err := t.keyer.GenerateGlobalVersionKey(nil, folder, nil)
 	if err != nil {
 		return err
@@ -389,8 +387,8 @@ func (t *readOnlyTransaction) withNeed(folder, device []byte, truncate bool, fn 
 	return dbi.Error()
 }
 
-func (t *readOnlyTransaction) withNeedLocal(folder []byte, truncate bool, fn Iterator) error {
-	key, err := t.keyer.GenerateNeedFileKey(nil, folder, nil)
+func (t *readOnlyTransaction) withNeed(folder, device []byte, truncate bool, fn Iterator) error {
+	key, err := t.keyer.GenerateNeedFileKey(nil, folder, device, nil)
 	if err != nil {
 		return err
 	}
@@ -514,7 +512,7 @@ func (t readWriteTransaction) updateGlobal(gk, keyBuf, folder, device []byte, fi
 	}
 
 	// Fixup the list of files we need.
-	keyBuf, err = t.updateLocalNeed(keyBuf, folder, name, fl, global)
+	keyBuf, err = t.updateNeed(keyBuf, folder, name, fl, global, meta.devices())
 	if err != nil {
 		return nil, false, err
 	}
@@ -563,28 +561,30 @@ func (t readWriteTransaction) updateGlobal(gk, keyBuf, folder, device []byte, fi
 // updateLocalNeed checks whether the given file is still needed on the local
 // device according to the version list and global FileInfo given and updates
 // the db accordingly.
-func (t readWriteTransaction) updateLocalNeed(keyBuf, folder, name []byte, fl VersionList, global protocol.FileInfo) ([]byte, error) {
+func (t readWriteTransaction) updateNeed(keyBuf, folder, name []byte, fl VersionList, global protocol.FileInfo, devices []protocol.DeviceID) ([]byte, error) {
 	var err error
-	keyBuf, err = t.keyer.GenerateNeedFileKey(keyBuf, folder, name)
-	if err != nil {
-		return nil, err
-	}
-	_, err = t.Get(keyBuf)
-	if err != nil && !backend.IsNotFound(err) {
-		return nil, err
-	}
-	hasNeeded := err == nil
-	if localFV, haveLocalFV := fl.Get(protocol.LocalDeviceID[:]); need(global, haveLocalFV, localFV.Version) {
-		if !hasNeeded {
-			l.Debugf("local need insert; folder=%q, name=%q", folder, name)
-			if err := t.Put(keyBuf, nil); err != nil {
+	for _, dev := range append(devices, protocol.LocalDeviceID) {
+		keyBuf, err = t.keyer.GenerateNeedFileKey(keyBuf, folder, dev[:], name)
+		if err != nil {
+			return nil, err
+		}
+		_, err = t.Get(keyBuf)
+		if err != nil && !backend.IsNotFound(err) {
+			return nil, err
+		}
+		hasNeeded := err == nil
+		if localFV, haveLocalFV := fl.Get(protocol.LocalDeviceID[:]); need(global, haveLocalFV, localFV.Version) {
+			if !hasNeeded {
+				l.Debugf("local need insert; folder=%q, name=%q", folder, name)
+				if err := t.Put(keyBuf, nil); err != nil {
+					return nil, err
+				}
+			}
+		} else if hasNeeded {
+			l.Debugf("local need delete; folder=%q, name=%q", folder, name)
+			if err := t.Delete(keyBuf); err != nil {
 				return nil, err
 			}
-		}
-	} else if hasNeeded {
-		l.Debugf("local need delete; folder=%q, name=%q", folder, name)
-		if err := t.Delete(keyBuf); err != nil {
-			return nil, err
 		}
 	}
 	return keyBuf, nil
@@ -648,12 +648,14 @@ func (t readWriteTransaction) removeFromGlobal(gk, keyBuf, folder, device []byte
 	}
 
 	if len(fl.Versions) == 0 {
-		keyBuf, err = t.keyer.GenerateNeedFileKey(keyBuf, folder, file)
-		if err != nil {
-			return nil, err
-		}
-		if err := t.Delete(keyBuf); err != nil {
-			return nil, err
+		for _, dev := range append(meta.devices(), protocol.LocalDeviceID) {
+			keyBuf, err = t.keyer.GenerateNeedFileKey(keyBuf, folder, dev[:], file)
+			if err != nil {
+				return nil, err
+			}
+			if err := t.Delete(keyBuf); err != nil {
+				return nil, err
+			}
 		}
 		if err := t.Delete(gk); err != nil {
 			return nil, err
@@ -670,7 +672,7 @@ func (t readWriteTransaction) removeFromGlobal(gk, keyBuf, folder, device []byte
 		if err != nil || !ok {
 			return keyBuf, err
 		}
-		keyBuf, err = t.updateLocalNeed(keyBuf, folder, file, fl, global)
+		keyBuf, err = t.updateNeed(keyBuf, folder, file, fl, global, meta.devices())
 		if err != nil {
 			return nil, err
 		}

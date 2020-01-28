@@ -76,6 +76,11 @@ func (db *Lowlevel) ListFolders() []string {
 	return db.folderIdx.Values()
 }
 
+// ListDevices returns the list of devices currently in the database
+func (db *Lowlevel) ListDevices() []string {
+	return db.deviceIdx.Values()
+}
+
 // updateRemoteFiles adds a list of fileinfos to the database and updates the
 // global versionlist and metadata.
 func (db *Lowlevel) updateRemoteFiles(folder, device []byte, fs []protocol.FileInfo, meta *metadataTracker) error {
@@ -273,11 +278,11 @@ func (db *Lowlevel) dropFolder(folder []byte) error {
 	}
 
 	// Remove all needs related to the folder
-	k3, err := db.keyer.GenerateNeedFileKey(nil, folder, nil)
+	k3, err := db.keyer.GenerateNeedFileKey(nil, folder, nil, nil)
 	if err != nil {
 		return err
 	}
-	if err := t.deleteKeyPrefix(k3.WithoutName()); err != nil {
+	if err := t.deleteKeyPrefix(k3.WithoutNameAndDevice()); err != nil {
 		return err
 	}
 

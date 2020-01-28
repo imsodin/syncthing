@@ -57,7 +57,7 @@ const (
 	// KeyTypeSequence <int32 folder ID> <int64 sequence number> = KeyTypeDevice key
 	KeyTypeSequence = 11
 
-	// KeyTypeNeed <int32 folder ID> <file name> = <nothing>
+	// KeyTypeNeed <int32 folder ID> <int32 device ID> <file name> = <nothing>
 	KeyTypeNeed = 12
 
 	// KeyTypeBlockList <block list hash> = BlockList
@@ -81,7 +81,7 @@ type keyer interface {
 	NameFromBlockMapKey(key []byte) []byte
 
 	// file need index
-	GenerateNeedFileKey(key, folder, name []byte) (needFileKey, error)
+	GenerateNeedFileKey(key, folder, device, name []byte) (needFileKey, error)
 
 	// file sequence index
 	GenerateSequenceKey(key, folder []byte, seq int64) (sequenceKey, error)
@@ -202,18 +202,20 @@ func (k blockMapKey) WithoutHashAndName() []byte {
 type needFileKey []byte
 
 func (k needFileKey) WithoutName() []byte {
+	return k[:keyPrefixLen+keyFolderLen+keyDeviceLen]
+}
+
+func (k needFileKey) WithoutNameAndDevice() []byte {
 	return k[:keyPrefixLen+keyFolderLen]
 }
 
-func (k defaultKeyer) GenerateNeedFileKey(key, folder, name []byte) (needFileKey, error) {
-	folderID, err := k.folderIdx.ID(folder)
+func (k defaultKeyer) GenerateNeedFileKey(key, folder, device, name []byte) (needFileKey, error) {
+	var err error
+	key, err = k.GenerateDeviceFileKey(key, folder, device, name)
 	if err != nil {
 		return nil, err
 	}
-	key = resize(key, keyPrefixLen+keyFolderLen+len(name))
 	key[0] = KeyTypeNeed
-	binary.BigEndian.PutUint32(key[keyPrefixLen:], folderID)
-	copy(key[keyPrefixLen+keyFolderLen:], name)
 	return key, nil
 }
 

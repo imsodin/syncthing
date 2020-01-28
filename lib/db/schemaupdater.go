@@ -73,14 +73,13 @@ func (db *schemaUpdater) updateSchema() error {
 		schemaVersion int64
 		migration     func(prevVersion int) error
 	}
+	// Updates to 3, 5 and 7 regarded old style needs, which were removed in 9
 	var migrations = []migration{
 		{1, db.updateSchema0to1},
 		{2, db.updateSchema1to2},
-		{3, db.updateSchema2to3},
-		{5, db.updateSchemaTo5},
 		{6, db.updateSchema5to6},
-		{7, db.updateSchema6to7},
 		{8, db.updateSchema7to8},
+		{9, db.updateSchemato9},
 	}
 
 	for _, m := range migrations {
@@ -243,84 +242,6 @@ func (db *schemaUpdater) updateSchema1to2(_ int) error {
 	return t.commit()
 }
 
-// updateSchema2to3 introduces a needKey->nil bucket for locally needed files.
-func (db *schemaUpdater) updateSchema2to3(_ int) error {
-	t, err := db.newReadWriteTransaction()
-	if err != nil {
-		return err
-	}
-	defer t.close()
-
-	var nk []byte
-	var dk []byte
-	for _, folderStr := range db.ListFolders() {
-		folder := []byte(folderStr)
-		var putErr error
-		err := t.withGlobal(folder, nil, true, func(f FileIntf) bool {
-			name := []byte(f.FileName())
-			dk, putErr = db.keyer.GenerateDeviceFileKey(dk, folder, protocol.LocalDeviceID[:], name)
-			if putErr != nil {
-				return false
-			}
-			var v protocol.Vector
-			haveFile, ok, err := t.getFileTrunc(dk, true)
-			if err != nil {
-				putErr = err
-				return false
-			}
-			if ok {
-				v = haveFile.FileVersion()
-			}
-			if !need(f, ok, v) {
-				return true
-			}
-			nk, putErr = t.keyer.GenerateNeedFileKey(nk, folder, []byte(f.FileName()))
-			if putErr != nil {
-				return false
-			}
-			putErr = t.Put(nk, nil)
-			return putErr == nil
-		})
-		if putErr != nil {
-			return putErr
-		}
-		if err != nil {
-			return err
-		}
-	}
-	return t.commit()
-}
-
-// updateSchemaTo5 resets the need bucket due to bugs existing in the v0.14.49
-// release candidates (dbVersion 3 and 4)
-// https://github.com/syncthing/syncthing/issues/5007
-// https://github.com/syncthing/syncthing/issues/5053
-func (db *schemaUpdater) updateSchemaTo5(prevVersion int) error {
-	if prevVersion != 3 && prevVersion != 4 {
-		return nil
-	}
-
-	t, err := db.newReadWriteTransaction()
-	if err != nil {
-		return err
-	}
-	var nk []byte
-	for _, folderStr := range db.ListFolders() {
-		nk, err = db.keyer.GenerateNeedFileKey(nk, []byte(folderStr), nil)
-		if err != nil {
-			return err
-		}
-		if err := t.deleteKeyPrefix(nk[:keyPrefixLen+keyFolderLen]); err != nil {
-			return err
-		}
-	}
-	if err := t.commit(); err != nil {
-		return err
-	}
-
-	return db.updateSchema2to3(2)
-}
-
 func (db *schemaUpdater) updateSchema5to6(_ int) error {
 	// For every local file with the Invalid bit set, clear the Invalid bit and
 	// set LocalFlags = FlagLocalIgnored.
@@ -364,63 +285,6 @@ func (db *schemaUpdater) updateSchema5to6(_ int) error {
 	return t.commit()
 }
 
-// updateSchema6to7 checks whether all currently locally needed files are really
-// needed and removes them if not.
-func (db *schemaUpdater) updateSchema6to7(_ int) error {
-	t, err := db.newReadWriteTransaction()
-	if err != nil {
-		return err
-	}
-	defer t.close()
-
-	var gk []byte
-	var nk []byte
-
-	for _, folderStr := range db.ListFolders() {
-		folder := []byte(folderStr)
-		var delErr error
-		err := t.withNeedLocal(folder, false, func(f FileIntf) bool {
-			name := []byte(f.FileName())
-			global := f.(protocol.FileInfo)
-			gk, delErr = db.keyer.GenerateGlobalVersionKey(gk, folder, name)
-			if delErr != nil {
-				return false
-			}
-			svl, err := t.Get(gk)
-			if err != nil {
-				// If there is no global list, we hardly need it.
-				key, err := t.keyer.GenerateNeedFileKey(nk, folder, name)
-				if err != nil {
-					delErr = err
-					return false
-				}
-				delErr = t.Delete(key)
-				return delErr == nil
-			}
-			var fl VersionList
-			err = fl.Unmarshal(svl)
-			if err != nil {
-				// This can't happen, but it's ignored everywhere else too,
-				// so lets not act on it.
-				return true
-			}
-			if localFV, haveLocalFV := fl.Get(protocol.LocalDeviceID[:]); !need(global, haveLocalFV, localFV.Version) {
-				key, err := t.keyer.GenerateNeedFileKey(nk, folder, name)
-				if err != nil {
-					delErr = err
-					return false
-				}
-				delErr = t.Delete(key)
-			}
-			return delErr == nil
-		})
-		if err != nil {
-			return err
-		}
-	}
-	return t.commit()
-}
-
 func (db *schemaUpdater) updateSchema7to8(_ int) error {
 	// Loads and rewrites all files with blocks, to deduplicate block lists.
 
@@ -452,6 +316,43 @@ func (db *schemaUpdater) updateSchema7to8(_ int) error {
 	}
 
 	db.recordTime(blockGCTimeKey)
+
+	return t.commit()
+}
+
+func (db *schemaUpdater) updateSchemato9(_ int) error {
+	t, err := db.newReadWriteTransaction()
+	if err != nil {
+		return err
+	}
+	defer t.close()
+
+	// Remove "old style" need keys
+	if err := t.deleteKeyPrefix([]byte{KeyTypeNeed}); err != nil {
+		return err
+	}
+
+	var innerErr error
+	var keyBuf []byte
+	deviceList := db.ListDevices()
+	for _, folderStr := range db.ListFolders() {
+		folder := []byte(folderStr)
+		for _, deviceStr := range deviceList {
+			device := []byte(deviceStr)
+			err := t.withNeedDeprecated(folder, device, true, func(f FileIntf) bool {
+				if keyBuf, innerErr = t.keyer.GenerateNeedFileKey(keyBuf, folder, device, []byte(f.FileName())); innerErr != nil {
+					return false
+				}
+				innerErr = t.Put(keyBuf, nil)
+				return innerErr == nil
+			})
+			if innerErr != nil {
+				return innerErr
+			} else if err != nil {
+				return err
+			}
+		}
+	}
 
 	return t.commit()
 }
