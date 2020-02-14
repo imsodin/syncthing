@@ -236,7 +236,7 @@ func (a *App) startup() error {
 		miscDB.PutString("prevVersion", build.Version)
 	}
 
-	m := model.NewModel(a.cfg, a.myID, "syncthing", build.Version, a.ll, protectedFiles, a.evLogger)
+	m := model.NewModel(a.cfg, a.myID, "syncthing", build.Version, a.ll, protectedFiles, a.evLogger, &controller{a})
 
 	if a.opts.DeadlockTimeoutS > 0 {
 		m.StartDeadlockDetector(time.Duration(a.opts.DeadlockTimeoutS) * time.Second)
@@ -462,4 +462,8 @@ func (e *controller) Shutdown() {
 
 func (e *controller) ExitUpgrading() {
 	e.Stop(ExitUpgrade)
+}
+
+func (e *controller) Fail() {
+	e.Stop(ExitError)
 }

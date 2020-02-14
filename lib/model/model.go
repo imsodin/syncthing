@@ -119,6 +119,7 @@ type model struct {
 	db             *db.Lowlevel
 	protectedFiles []string
 	evLogger       events.Logger
+	failer         failer
 
 	// constant or concurrency safe fields
 	finder            *db.BlockFinder
@@ -176,10 +177,10 @@ var (
 	errStopped              = errors.New("Syncthing is being stopped")
 )
 
-// NewModel creates and starts a new model. The model starts in read-only mode,
+// Failerel creates and starts a new model. The model starts in read-only mode,
 // where it sends index information to connected peers and responds to requests
 // for file data without altering the local folder in any way.
-func NewModel(cfg config.Wrapper, id protocol.DeviceID, clientName, clientVersion string, ldb *db.Lowlevel, protectedFiles []string, evLogger events.Logger) Model {
+func NewModel(cfg config.Wrapper, id protocol.DeviceID, clientName, clientVersion string, ldb *db.Lowlevel, protectedFiles []string, evLogger events.Logger, failer failer) Model {
 	m := &model{
 		Supervisor: suture.New("model", suture.Spec{
 			Log: func(line string) {
@@ -196,6 +197,7 @@ func NewModel(cfg config.Wrapper, id protocol.DeviceID, clientName, clientVersio
 		db:             ldb,
 		protectedFiles: protectedFiles,
 		evLogger:       evLogger,
+		failer:         failer,
 
 		// constant or concurrency safe fields
 		finder:               db.NewBlockFinder(ldb),
@@ -2723,4 +2725,8 @@ func (m *syncMutexMap) Get(key string) sync.Mutex {
 func sanitizePath(path string) string {
 	invalid := regexp.MustCompile(`([[:cntrl:]]|[<>:"'/\\|?*\n\r\t \[\]\{\};:!@$%&^#])+`)
 	return strings.TrimSpace(invalid.ReplaceAllString(path, " "))
+}
+
+type failer interface {
+	Fail()
 }
