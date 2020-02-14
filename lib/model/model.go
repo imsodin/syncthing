@@ -94,8 +94,8 @@ type Model interface {
 	NeedFolderFiles(folder string, page, perpage int) ([]db.FileInfoTruncated, []db.FileInfoTruncated, []db.FileInfoTruncated)
 	FolderProgressBytesCompleted(folder string) int64
 
-	CurrentFolderFile(folder string, file string) (protocol.FileInfo, bool)
-	CurrentGlobalFile(folder string, file string) (protocol.FileInfo, bool)
+	CurrentFolderFile(folder string, file string) (protocol.FileInfo, bool, error)
+	CurrentGlobalFile(folder string, file string) (protocol.FileInfo, bool, error)
 	Availability(folder string, file protocol.FileInfo, block protocol.BlockInfo) []Availability
 
 	Completion(device protocol.DeviceID, folder string) FolderCompletion
@@ -176,8 +176,6 @@ var (
 	errIgnoredFolderRemoved = errors.New("folder no longer ignored")
 	errReplacingConnection  = errors.New("replacing connection")
 	errStopped              = errors.New("Syncthing is being stopped")
-
-	dbErrorMsg = "Database error (the database might be permanently damaged):"
 )
 
 // Failerel creates and starts a new model. The model starts in read-only mode,
@@ -272,9 +270,9 @@ func (m *model) Stop() {
 }
 
 // fail stops the entire app
-func (m *model) fail(context string, err error) {
+func (m *model) dbFail(err error) {
 	m.failOnce.Do(func() {
-		l.Warnf("%v: %v", context, err)
+		l.Warnf("Database error (the database might be permanently damaged): %v", err)
 		m.failer.Fail()
 	})
 }
@@ -346,7 +344,10 @@ func (m *model) startFolderLocked(cfg config.FolderConfiguration) {
 		}
 	}
 
-	ffs := fset.MtimeFS()
+	ffs, err := fset.MtimeFS()
+	if err != nil {
+		return
+	}
 
 	// These are our metadata files, and they should always be hidden.
 	_ = ffs.Hide(config.DefaultMarkerName)
@@ -428,9 +429,8 @@ func (m *model) addFolder(cfg config.FolderConfiguration) {
 
 	// Creating the fileset can take a long time (metadata calculation) so
 	// we do it outside of the lock.
-	fset, err := db.NewFileSet(cfg.ID, cfg.Filesystem(), m.db)
+	fset, err := db.NewFileSet(cfg.ID, cfg.Filesystem(), m.db, m.dbFail)
 	if err != nil {
-		m.fail(dbErrorMsg, err)
 		return
 	}
 
@@ -472,7 +472,9 @@ func (m *model) removeFolder(cfg config.FolderConfiguration) {
 	m.fmut.Unlock()
 
 	// Remove it from the database
-	db.DropFolder(m.db, cfg.ID)
+	if err := db.DropFolder(m.db, cfg.ID); err != nil {
+		m.dbFail(err)
+	}
 }
 
 func (m *model) stopFolder(cfg config.FolderConfiguration, err error) {
@@ -540,9 +542,8 @@ func (m *model) restartFolder(from, to config.FolderConfiguration) {
 		// Creating the fileset can take a long time (metadata calculation)
 		// so we do it outside of the lock.
 		var err error
-		fset, err = db.NewFileSet(to.ID, to.Filesystem(), m.db)
+		fset, err = db.NewFileSet(to.ID, to.Filesystem(), m.db, m.dbFail)
 		if err != nil {
-			m.fail(dbErrorMsg, err)
 			return
 		}
 	}
@@ -563,9 +564,8 @@ func (m *model) restartFolder(from, to config.FolderConfiguration) {
 func (m *model) newFolder(cfg config.FolderConfiguration) {
 	// Creating the fileset can take a long time (metadata calculation) so
 	// we do it outside of the lock.
-	fset, err := db.NewFileSet(cfg.ID, cfg.Filesystem(), m.db)
+	fset, err := db.NewFileSet(cfg.ID, cfg.Filesystem(), m.db, m.dbFail)
 	if err != nil {
-		m.fail(dbErrorMsg, err)
 		return
 	}
 
@@ -802,7 +802,10 @@ func (m *model) Completion(device protocol.DeviceID, folder string) FolderComple
 		return FolderCompletion{} // Folder doesn't exist, so we hardly have any of it
 	}
 
-	snap := rf.Snapshot()
+	snap, err := rf.Snapshot()
+	if err != nil {
+		return FolderCompletion{}
+	}
 	defer snap.Release()
 
 	tot := snap.GlobalSize().Bytes
@@ -872,7 +875,7 @@ func (m *model) DBSnapshot(folder string) (*db.Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	return rf.Snapshot(), nil
+	return rf.Snapshot()
 }
 
 func (m *model) FolderProgressBytesCompleted(folder string) int64 {
@@ -892,7 +895,10 @@ func (m *model) NeedFolderFiles(folder string, page, perpage int) ([]db.FileInfo
 		return nil, nil, nil
 	}
 
-	snap := rf.Snapshot()
+	snap, err := rf.Snapshot()
+	if err != nil {
+		return nil, nil, nil
+	}
 	defer snap.Release()
 	var progress, queued, rest []db.FileInfoTruncated
 	var seen map[string]struct{}
@@ -908,14 +914,18 @@ func (m *model) NeedFolderFiles(folder string, page, perpage int) ([]db.FileInfo
 		seen = make(map[string]struct{}, len(progressNames)+len(queuedNames))
 
 		for i, name := range progressNames {
-			if f, ok := snap.GetGlobalTruncated(name); ok {
+			if f, ok, err := snap.GetGlobalTruncated(name); err != nil {
+				return nil, nil, nil
+			} else if ok {
 				progress[i] = f
 				seen[name] = struct{}{}
 			}
 		}
 
 		for i, name := range queuedNames {
-			if f, ok := snap.GetGlobalTruncated(name); ok {
+			if f, ok, err := snap.GetGlobalTruncated(name); err != nil {
+				return nil, nil, nil
+			} else if ok {
 				queued[i] = f
 				seen[name] = struct{}{}
 			}
@@ -1079,7 +1089,10 @@ func (m *model) ClusterConfig(deviceID protocol.DeviceID, cm protocol.ClusterCon
 			tempIndexFolders = append(tempIndexFolders, folder.ID)
 		}
 
-		myIndexID := fs.IndexID(protocol.LocalDeviceID)
+		myIndexID, err := fs.IndexID(protocol.LocalDeviceID)
+		if err != nil {
+			return err
+		}
 		mySequence := fs.Sequence(protocol.LocalDeviceID)
 		var startSequence int64
 
@@ -1121,7 +1134,10 @@ func (m *model) ClusterConfig(deviceID protocol.DeviceID, cm protocol.ClusterCon
 				// otherwise we drop our old index data and expect to get a
 				// completely new set.
 
-				theirIndexID := fs.IndexID(deviceID)
+				theirIndexID, err := fs.IndexID(deviceID)
+				if err != nil {
+					return err
+				}
 				if dev.IndexID == 0 {
 					// They're not announcing an index ID. This means they
 					// do not support delta indexes and we should clear any
@@ -1626,22 +1642,26 @@ func newLimitedRequestResponse(size int, limiters ...*byteSemaphore) *requestRes
 	return res
 }
 
-func (m *model) recheckFile(deviceID protocol.DeviceID, folderFs fs.Filesystem, folder, name string, size int32, offset int64, hash []byte) {
-	cf, ok := m.CurrentFolderFile(folder, name)
+func (m *model) recheckFile(deviceID protocol.DeviceID, folderFs fs.Filesystem, folder, name string, size int32, offset int64, hash []byte) error {
+	cf, ok, err := m.CurrentFolderFile(folder, name)
+	if err != nil {
+		l.Debugf("%v recheckFile: %s: %q / %q: %v", m, deviceID, folder, name, err)
+		return err
+	}
 	if !ok {
 		l.Debugf("%v recheckFile: %s: %q / %q: no current file", m, deviceID, folder, name)
-		return
+		return nil
 	}
 
 	if cf.IsDeleted() || cf.IsInvalid() || cf.IsSymlink() || cf.IsDirectory() {
 		l.Debugf("%v recheckFile: %s: %q / %q: not a regular file", m, deviceID, folder, name)
-		return
+		return nil
 	}
 
 	blockIndex := int(offset / int64(cf.BlockSize()))
 	if blockIndex >= len(cf.Blocks) {
 		l.Debugf("%v recheckFile: %s: %q / %q i=%d: block index too far", m, deviceID, folder, name, blockIndex)
-		return
+		return nil
 	}
 
 	block := cf.Blocks[blockIndex]
@@ -1649,7 +1669,7 @@ func (m *model) recheckFile(deviceID protocol.DeviceID, folderFs fs.Filesystem, 
 	// Seems to want a different version of the file, whatever.
 	if !bytes.Equal(block.Hash, hash) {
 		l.Debugf("%v recheckFile: %s: %q / %q i=%d: hash mismatch %x != %x", m, deviceID, folder, name, blockIndex, block.Hash, hash)
-		return
+		return nil
 	}
 
 	// The hashes provided part of the request match what we expect to find according
@@ -1661,35 +1681,43 @@ func (m *model) recheckFile(deviceID protocol.DeviceID, folderFs fs.Filesystem, 
 	m.fmut.RUnlock()
 	if !ok {
 		l.Debugf("%v recheckFile: %s: %q / %q: Folder stopped before rescan could be scheduled", m, deviceID, folder, name)
-		return
+		return nil
 	}
 	if err := runner.ForceRescan(cf); err != nil {
 		l.Debugf("%v recheckFile: %s: %q / %q rescan: %s", m, deviceID, folder, name, err)
-		return
+		return nil
 	}
 	l.Debugf("%v recheckFile: %s: %q / %q", m, deviceID, folder, name)
+
+	return nil
 }
 
-func (m *model) CurrentFolderFile(folder string, file string) (protocol.FileInfo, bool) {
+func (m *model) CurrentFolderFile(folder string, file string) (protocol.FileInfo, bool, error) {
 	m.fmut.RLock()
 	fs, ok := m.folderFiles[folder]
 	m.fmut.RUnlock()
 	if !ok {
-		return protocol.FileInfo{}, false
+		return protocol.FileInfo{}, false, nil
 	}
-	snap := fs.Snapshot()
+	snap, err := fs.Snapshot()
+	if err != nil {
+		return protocol.FileInfo{}, false, err
+	}
 	defer snap.Release()
 	return snap.Get(protocol.LocalDeviceID, file)
 }
 
-func (m *model) CurrentGlobalFile(folder string, file string) (protocol.FileInfo, bool) {
+func (m *model) CurrentGlobalFile(folder string, file string) (protocol.FileInfo, bool, error) {
 	m.fmut.RLock()
 	fs, ok := m.folderFiles[folder]
 	m.fmut.RUnlock()
 	if !ok {
-		return protocol.FileInfo{}, false
+		return protocol.FileInfo{}, false, nil
 	}
-	snap := fs.Snapshot()
+	snap, err := fs.Snapshot()
+	if err != nil {
+		return protocol.FileInfo{}, false, err
+	}
 	defer snap.Release()
 	return snap.GetGlobal(file)
 }
@@ -1871,7 +1899,10 @@ func (m *model) AddConnection(conn connections.Connection, hello protocol.HelloR
 	m.pmut.Unlock()
 
 	// Acquires fmut, so has to be done outside of pmut.
-	cm := m.generateClusterConfig(deviceID)
+	cm, err := m.generateClusterConfig(deviceID)
+	if err != nil {
+		return
+	}
 	conn.ClusterConfig(cm)
 
 	if (device.Name == "" || m.cfg.Options().OverwriteRemoteDevNames) && hello.DeviceName != "" {
@@ -2004,7 +2035,10 @@ func (s *indexSender) sendIndexTo(ctx context.Context) error {
 
 	var err error
 	var f protocol.FileInfo
-	snap := s.fset.Snapshot()
+	snap, err := s.fset.Snapshot()
+	if err != nil {
+		return err
+	}
 	defer snap.Release()
 	snap.WithHaveSequence(s.prevSequence+1, func(fi db.FileIntf) bool {
 		if err = batch.flushIfFull(); err != nil {
@@ -2155,7 +2189,7 @@ func (m *model) numHashers(folder string) int {
 
 // generateClusterConfig returns a ClusterConfigMessage that is correct for
 // the given peer device
-func (m *model) generateClusterConfig(device protocol.DeviceID) protocol.ClusterConfig {
+func (m *model) generateClusterConfig(device protocol.DeviceID) (protocol.ClusterConfig, error) {
 	var message protocol.ClusterConfig
 
 	m.fmut.RLock()
@@ -2194,13 +2228,15 @@ func (m *model) generateClusterConfig(device protocol.DeviceID) protocol.Cluster
 			}
 
 			if fs != nil {
+				var err error
 				if deviceCfg.DeviceID == m.id {
-					protocolDevice.IndexID = fs.IndexID(protocol.LocalDeviceID)
+					protocolDevice.IndexID, err = fs.IndexID(protocol.LocalDeviceID)
 					protocolDevice.MaxSequence = fs.Sequence(protocol.LocalDeviceID)
 				} else {
-					protocolDevice.IndexID = fs.IndexID(deviceCfg.DeviceID)
+					protocolDevice.IndexID, err = fs.IndexID(deviceCfg.DeviceID)
 					protocolDevice.MaxSequence = fs.Sequence(deviceCfg.DeviceID)
 				}
+				return protocol.ClusterConfig{}, err
 			}
 
 			protocolFolder.Devices = append(protocolFolder.Devices, protocolDevice)
@@ -2209,7 +2245,7 @@ func (m *model) generateClusterConfig(device protocol.DeviceID) protocol.Cluster
 		message.Folders = append(message.Folders, protocolFolder)
 	}
 
-	return message
+	return message, nil
 }
 
 func (m *model) State(folder string) (string, time.Time, error) {
@@ -2294,7 +2330,10 @@ func (m *model) GlobalDirectoryTree(folder, prefix string, levels int, dirsonly 
 		prefix = prefix + sep
 	}
 
-	snap := files.Snapshot()
+	snap, err := files.Snapshot()
+	if err != nil {
+		return nil
+	}
 	defer snap.Release()
 	snap.WithPrefixedGlobalTruncated(prefix, func(fi db.FileIntf) bool {
 		f := fi.(db.FileInfoTruncated)
@@ -2406,10 +2445,17 @@ func (m *model) Availability(folder string, file protocol.FileInfo, block protoc
 	}
 
 	var availabilities []Availability
-	snap := fs.Snapshot()
+	snap, err := fs.Snapshot()
+	if err != nil {
+		return nil
+	}
 	defer snap.Release()
+	avail, err := snap.Availability(file.Name)
+	if err != nil {
+		return nil
+	}
 next:
-	for _, device := range snap.Availability(file.Name) {
+	for _, device := range avail {
 		for _, pausedFolder := range m.remotePausedFolders[device] {
 			if pausedFolder == folder {
 				continue next
@@ -2443,7 +2489,9 @@ func (m *model) BringToFront(folder, file string) {
 
 func (m *model) ResetFolder(folder string) {
 	l.Infof("Cleaning data for folder %q", folder)
-	db.DropFolder(m.db, folder)
+	if err := db.DropFolder(m.db, folder); err != nil {
+		m.dbFail(err)
+	}
 }
 
 func (m *model) String() string {

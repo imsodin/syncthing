@@ -189,7 +189,10 @@ func (a *App) startup() error {
 
 	if a.opts.ResetDeltaIdxs {
 		l.Infoln("Reinitializing delta index IDs")
-		db.DropDeltaIndexIDs(a.ll)
+		if err := db.DropDeltaIndexIDs(a.ll); err != nil {
+			l.Warnln("Reinitializing delta index IDs:", err)
+			return err
+		}
 	}
 
 	protectedFiles := []string{
@@ -204,7 +207,10 @@ func (a *App) startup() error {
 	for _, folder := range a.ll.ListFolders() {
 		if _, ok := folders[folder]; !ok {
 			l.Infof("Cleaning data for dropped folder %q", folder)
-			db.DropFolder(a.ll, folder)
+			if err := db.DropFolder(a.ll, folder); err != nil {
+				l.Warnf("Cleaning data for dropped folder %q: %v", folder, err)
+				return err
+			}
 		}
 	}
 
@@ -230,7 +236,10 @@ func (a *App) startup() error {
 
 		// Drop delta indexes in case we've changed random stuff we
 		// shouldn't have. We will resend our index on next connect.
-		db.DropDeltaIndexIDs(a.ll)
+		if err := db.DropDeltaIndexIDs(a.ll); err != nil {
+			l.Warnln("Reinitializing delta index IDs on upgrade:", err)
+			return err
+		}
 
 		// Remember the new version.
 		miscDB.PutString("prevVersion", build.Version)
