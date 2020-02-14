@@ -70,7 +70,7 @@ func init() {
 	}
 }
 
-func NewFileSet(folder string, fs fs.Filesystem, db *Lowlevel) *FileSet {
+func NewFileSet(folder string, fs fs.Filesystem, db *Lowlevel) (*FileSet, error) {
 	var s = &FileSet{
 		folder:      folder,
 		fs:          fs,
@@ -79,31 +79,22 @@ func NewFileSet(folder string, fs fs.Filesystem, db *Lowlevel) *FileSet {
 		updateMutex: sync.NewMutex(),
 	}
 
-	recalc := func() *FileSet {
-		if err := s.recalcMeta(); backend.IsClosed(err) {
-			return nil
-		} else if err != nil {
-			panic(err)
-		}
-		return s
-	}
-
 	if err := s.meta.fromDB(db, []byte(folder)); err != nil {
 		l.Infof("No stored folder metadata for %q; recalculating", folder)
-		return recalc()
+		return s, s.recalcMeta()
 	}
 
 	if metaOK := s.verifyLocalSequence(); !metaOK {
 		l.Infof("Stored folder metadata for %q is out of date after crash; recalculating", folder)
-		return recalc()
+		return s, s.recalcMeta()
 	}
 
 	if age := time.Since(s.meta.Created()); age > databaseRecheckInterval {
 		l.Infof("Stored folder metadata for %q is %v old; recalculating", folder, age)
-		return recalc()
+		return s, s.recalcMeta()
 	}
 
-	return s
+	return s, nil
 }
 
 func (s *FileSet) recalcMeta() error {

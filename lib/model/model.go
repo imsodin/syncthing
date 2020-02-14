@@ -524,7 +524,12 @@ func (m *model) restartFolder(from, to config.FolderConfiguration) {
 	if !to.Paused {
 		// Creating the fileset can take a long time (metadata calculation)
 		// so we do it outside of the lock.
-		fset = db.NewFileSet(to.ID, to.Filesystem(), m.db)
+		fset, err := db.NewFileSet(to.ID, to.Filesystem(), m.db)
+		err != nil {
+			l.Warnln("Database error (the database might be permanently damaged):", err)
+			m.Fail()
+			return
+		}
 	}
 
 	m.stopFolder(from, fmt.Errorf("%v folder %v", errMsg, to.Description()))
