@@ -153,16 +153,14 @@ func (s *FileSet) verifyLocalSequence() bool {
 	return ok
 }
 
-func (s *FileSet) Drop(device protocol.DeviceID) {
+func (s *FileSet) Drop(device protocol.DeviceID) error {
 	l.Debugf("%s Drop(%v)", s.folder, device)
 
 	s.updateMutex.Lock()
 	defer s.updateMutex.Unlock()
 
-	if err := s.db.dropDeviceFolder(device[:], []byte(s.folder), s.meta); backend.IsClosed(err) {
-		return
-	} else if err != nil {
-		panic(err)
+	if err := s.db.dropDeviceFolder(device[:], []byte(s.folder), s.meta); err != nil {
+		return err
 	}
 
 	if device == protocol.LocalDeviceID {
@@ -181,26 +179,18 @@ func (s *FileSet) Drop(device protocol.DeviceID) {
 	}
 
 	t, err := s.db.newReadWriteTransaction()
-	if backend.IsClosed(err) {
-		return
-	} else if err != nil {
-		panic(err)
+	if err != nil {
+		return err
 	}
 	defer t.close()
 
-	if err := s.meta.toDB(t, []byte(s.folder)); backend.IsClosed(err) {
-		return
-	} else if err != nil {
-		panic(err)
+	if err := s.meta.toDB(t, []byte(s.folder)); err != nil {
+		return err
 	}
-	if err := t.Commit(); backend.IsClosed(err) {
-		return
-	} else if err != nil {
-		panic(err)
-	}
+	return t.Commit()
 }
 
-func (s *FileSet) Update(device protocol.DeviceID, fs []protocol.FileInfo) {
+func (s *FileSet) Update(device protocol.DeviceID, fs []protocol.FileInfo) error {
 	l.Debugf("%s Update(%v, [%d])", s.folder, device, len(fs))
 
 	// do not modify fs in place, it is still used in outer scope
@@ -213,15 +203,10 @@ func (s *FileSet) Update(device protocol.DeviceID, fs []protocol.FileInfo) {
 
 	if device == protocol.LocalDeviceID {
 		// For the local device we have a bunch of metadata to track.
-		if err := s.db.updateLocalFiles([]byte(s.folder), fs, s.meta); err != nil && !backend.IsClosed(err) {
-			panic(err)
-		}
-		return
+		return s.db.updateLocalFiles([]byte(s.folder), fs, s.meta)
 	}
 	// Easy case, just update the files and we're done.
-	if err := s.db.updateRemoteFiles([]byte(s.folder), device[:], fs, s.meta); err != nil && !backend.IsClosed(err) {
-		panic(err)
-	}
+	return s.db.updateRemoteFiles([]byte(s.folder), device[:], fs, s.meta)
 }
 
 type Snapshot struct {
@@ -246,71 +231,53 @@ func (s *Snapshot) Release() {
 	s.t.close()
 }
 
-func (s *Snapshot) WithNeed(device protocol.DeviceID, fn Iterator) {
+func (s *Snapshot) WithNeed(device protocol.DeviceID, fn Iterator) error {
 	l.Debugf("%s WithNeed(%v)", s.folder, device)
-	if err := s.t.withNeed([]byte(s.folder), device[:], false, nativeFileIterator(fn)); err != nil && !backend.IsClosed(err) {
-		panic(err)
-	}
+	return s.t.withNeed([]byte(s.folder), device[:], false, nativeFileIterator(fn))
 }
 
-func (s *Snapshot) WithNeedTruncated(device protocol.DeviceID, fn Iterator) {
+func (s *Snapshot) WithNeedTruncated(device protocol.DeviceID, fn Iterator) error {
 	l.Debugf("%s WithNeedTruncated(%v)", s.folder, device)
-	if err := s.t.withNeed([]byte(s.folder), device[:], true, nativeFileIterator(fn)); err != nil && !backend.IsClosed(err) {
-		panic(err)
-	}
+	return s.t.withNeed([]byte(s.folder), device[:], true, nativeFileIterator(fn))
 }
 
-func (s *Snapshot) WithHave(device protocol.DeviceID, fn Iterator) {
+func (s *Snapshot) WithHave(device protocol.DeviceID, fn Iterator) error {
 	l.Debugf("%s WithHave(%v)", s.folder, device)
-	if err := s.t.withHave([]byte(s.folder), device[:], nil, false, nativeFileIterator(fn)); err != nil && !backend.IsClosed(err) {
-		panic(err)
-	}
+	return s.t.withHave([]byte(s.folder), device[:], nil, false, nativeFileIterator(fn))
 }
 
-func (s *Snapshot) WithHaveTruncated(device protocol.DeviceID, fn Iterator) {
+func (s *Snapshot) WithHaveTruncated(device protocol.DeviceID, fn Iterator) error {
 	l.Debugf("%s WithHaveTruncated(%v)", s.folder, device)
-	if err := s.t.withHave([]byte(s.folder), device[:], nil, true, nativeFileIterator(fn)); err != nil && !backend.IsClosed(err) {
-		panic(err)
-	}
+	return s.t.withHave([]byte(s.folder), device[:], nil, true, nativeFileIterator(fn))
 }
 
-func (s *Snapshot) WithHaveSequence(startSeq int64, fn Iterator) {
+func (s *Snapshot) WithHaveSequence(startSeq int64, fn Iterator) error {
 	l.Debugf("%s WithHaveSequence(%v)", s.folder, startSeq)
-	if err := s.t.withHaveSequence([]byte(s.folder), startSeq, nativeFileIterator(fn)); err != nil && !backend.IsClosed(err) {
-		panic(err)
-	}
+	return s.t.withHaveSequence([]byte(s.folder), startSeq, nativeFileIterator(fn))
 }
 
 // Except for an item with a path equal to prefix, only children of prefix are iterated.
 // E.g. for prefix "dir", "dir/file" is iterated, but "dir.file" is not.
-func (s *Snapshot) WithPrefixedHaveTruncated(device protocol.DeviceID, prefix string, fn Iterator) {
+func (s *Snapshot) WithPrefixedHaveTruncated(device protocol.DeviceID, prefix string, fn Iterator) error {
 	l.Debugf(`%s WithPrefixedHaveTruncated(%v, "%v")`, s.folder, device, prefix)
-	if err := s.t.withHave([]byte(s.folder), device[:], []byte(osutil.NormalizedFilename(prefix)), true, nativeFileIterator(fn)); err != nil && !backend.IsClosed(err) {
-		panic(err)
-	}
+	return s.t.withHave([]byte(s.folder), device[:], []byte(osutil.NormalizedFilename(prefix)), true, nativeFileIterator(fn))
 }
 
-func (s *Snapshot) WithGlobal(fn Iterator) {
+func (s *Snapshot) WithGlobal(fn Iterator) error {
 	l.Debugf("%s WithGlobal()", s.folder)
-	if err := s.t.withGlobal([]byte(s.folder), nil, false, nativeFileIterator(fn)); err != nil && !backend.IsClosed(err) {
-		panic(err)
-	}
+	return s.t.withGlobal([]byte(s.folder), nil, false, nativeFileIterator(fn))
 }
 
-func (s *Snapshot) WithGlobalTruncated(fn Iterator) {
+func (s *Snapshot) WithGlobalTruncated(fn Iterator) error {
 	l.Debugf("%s WithGlobalTruncated()", s.folder)
-	if err := s.t.withGlobal([]byte(s.folder), nil, true, nativeFileIterator(fn)); err != nil && !backend.IsClosed(err) {
-		panic(err)
-	}
+	return s.t.withGlobal([]byte(s.folder), nil, true, nativeFileIterator(fn))
 }
 
 // Except for an item with a path equal to prefix, only children of prefix are iterated.
 // E.g. for prefix "dir", "dir/file" is iterated, but "dir.file" is not.
-func (s *Snapshot) WithPrefixedGlobalTruncated(prefix string, fn Iterator) {
+func (s *Snapshot) WithPrefixedGlobalTruncated(prefix string, fn Iterator) error {
 	l.Debugf(`%s WithPrefixedGlobalTruncated("%v")`, s.folder, prefix)
-	if err := s.t.withGlobal([]byte(s.folder), []byte(osutil.NormalizedFilename(prefix)), true, nativeFileIterator(fn)); err != nil && !backend.IsClosed(err) {
-		panic(err)
-	}
+	return s.t.withGlobal([]byte(s.folder), []byte(osutil.NormalizedFilename(prefix)), true, nativeFileIterator(fn))
 }
 
 func (s *Snapshot) Get(device protocol.DeviceID, file string) (protocol.FileInfo, bool) {
@@ -488,13 +455,11 @@ func (s *FileSet) IndexID(device protocol.DeviceID) protocol.IndexID {
 	return id
 }
 
-func (s *FileSet) SetIndexID(device protocol.DeviceID, id protocol.IndexID) {
+func (s *FileSet) SetIndexID(device protocol.DeviceID, id protocol.IndexID) error {
 	if device == protocol.LocalDeviceID {
 		panic("do not explicitly set index ID for local device")
 	}
-	if err := s.db.setIndexID(device[:], []byte(s.folder), id); err != nil && !backend.IsClosed(err) {
-		panic(err)
-	}
+	return s.db.setIndexID(device[:], []byte(s.folder), id)
 }
 
 func (s *FileSet) MtimeFS() *fs.MtimeFS {
@@ -514,7 +479,7 @@ func (s *FileSet) ListDevices() []protocol.DeviceID {
 
 // DropFolder clears out all information related to the given folder from the
 // database.
-func DropFolder(db *Lowlevel, folder string) {
+func DropFolder(db *Lowlevel, folder string) error {
 	droppers := []func([]byte) error{
 		db.dropFolder,
 		db.dropMtimes,
@@ -522,32 +487,27 @@ func DropFolder(db *Lowlevel, folder string) {
 		db.folderIdx.Delete,
 	}
 	for _, drop := range droppers {
-		if err := drop([]byte(folder)); backend.IsClosed(err) {
-			return
-		} else if err != nil {
-			panic(err)
+		if err := drop([]byte(folder)); err != nil {
+			return err
 		}
 	}
+	return nil
 }
 
 // DropDeltaIndexIDs removes all delta index IDs from the database.
 // This will cause a full index transmission on the next connection.
-func DropDeltaIndexIDs(db *Lowlevel) {
+func DropDeltaIndexIDs(db *Lowlevel) error {
 	dbi, err := db.NewPrefixIterator([]byte{KeyTypeIndexID})
-	if backend.IsClosed(err) {
-		return
-	} else if err != nil {
-		panic(err)
+	if err != nil {
+		return err
 	}
 	defer dbi.Release()
 	for dbi.Next() {
-		if err := db.Delete(dbi.Key()); err != nil && !backend.IsClosed(err) {
-			panic(err)
+		if err := db.Delete(dbi.Key()); err != nil {
+			return err
 		}
 	}
-	if err := dbi.Error(); err != nil && !backend.IsClosed(err) {
-		panic(err)
-	}
+	return dbi.Error()
 }
 
 func normalizeFilenames(fs []protocol.FileInfo) {
