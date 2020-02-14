@@ -120,6 +120,7 @@ type model struct {
 	protectedFiles []string
 	evLogger       events.Logger
 	failer         failer
+	failOnce       stdsync.Once
 
 	// constant or concurrency safe fields
 	finder            *db.BlockFinder
@@ -175,6 +176,8 @@ var (
 	errIgnoredFolderRemoved = errors.New("folder no longer ignored")
 	errReplacingConnection  = errors.New("replacing connection")
 	errStopped              = errors.New("Syncthing is being stopped")
+
+	dbErrorMsg = "Database error (the database might be permanently damaged):"
 )
 
 // Failerel creates and starts a new model. The model starts in read-only mode,
@@ -266,6 +269,14 @@ func (m *model) Stop() {
 	}
 	w := m.closeConns(ids, errStopped)
 	w.Wait()
+}
+
+// fail stops the entire app
+func (m *model) fail(context string, err error) {
+	m.failOnce.Do(func() {
+		l.Warnf("%v: %v", context, err)
+		m.failer.Fail()
+	})
 }
 
 // StartDeadlockDetector starts a deadlock detector on the models locks which
@@ -417,7 +428,11 @@ func (m *model) addFolder(cfg config.FolderConfiguration) {
 
 	// Creating the fileset can take a long time (metadata calculation) so
 	// we do it outside of the lock.
-	fset := db.NewFileSet(cfg.ID, cfg.Filesystem(), m.db)
+	fset, err := db.NewFileSet(cfg.ID, cfg.Filesystem(), m.db)
+	if err != nil {
+		m.fail(dbErrorMsg, err)
+		return
+	}
 
 	m.fmut.Lock()
 	defer m.fmut.Unlock()
@@ -524,10 +539,10 @@ func (m *model) restartFolder(from, to config.FolderConfiguration) {
 	if !to.Paused {
 		// Creating the fileset can take a long time (metadata calculation)
 		// so we do it outside of the lock.
-		fset, err := db.NewFileSet(to.ID, to.Filesystem(), m.db)
-		err != nil {
-			l.Warnln("Database error (the database might be permanently damaged):", err)
-			m.Fail()
+		var err error
+		fset, err = db.NewFileSet(to.ID, to.Filesystem(), m.db)
+		if err != nil {
+			m.fail(dbErrorMsg, err)
 			return
 		}
 	}
@@ -548,7 +563,11 @@ func (m *model) restartFolder(from, to config.FolderConfiguration) {
 func (m *model) newFolder(cfg config.FolderConfiguration) {
 	// Creating the fileset can take a long time (metadata calculation) so
 	// we do it outside of the lock.
-	fset := db.NewFileSet(cfg.ID, cfg.Filesystem(), m.db)
+	fset, err := db.NewFileSet(cfg.ID, cfg.Filesystem(), m.db)
+	if err != nil {
+		m.fail(dbErrorMsg, err)
+		return
+	}
 
 	// Close connections to affected devices
 	m.closeConns(cfg.DeviceIDs(), fmt.Errorf("started folder %v", cfg.Description()))

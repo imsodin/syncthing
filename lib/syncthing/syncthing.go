@@ -449,21 +449,23 @@ func checkShortIDs(cfg config.Wrapper) error {
 	return nil
 }
 
-// Implements api.Controller
+// controller implements interfaces in model and api to shutdown App. This are
+// all non-blocking calls, to prevent an internal caller from hindering
+// shutdown while waiting for a return.
 type controller struct{ *App }
 
 func (e *controller) Restart() {
-	e.Stop(ExitRestart)
+	go e.Stop(ExitRestart)
 }
 
 func (e *controller) Shutdown() {
-	e.Stop(ExitSuccess)
+	go e.Stop(ExitSuccess)
 }
 
 func (e *controller) ExitUpgrading() {
-	e.Stop(ExitUpgrade)
+	go e.Stop(ExitUpgrade)
 }
 
 func (e *controller) Fail() {
-	e.Stop(ExitError)
+	go e.Stop(ExitError)
 }
