@@ -38,7 +38,7 @@ func TestIgnoredFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fs := NewFileSet("test", fs.NewFilesystem(fs.FilesystemTypeBasic, "."), db)
+	fs := newFileSet(t, "test", fs.NewFilesystem(fs.FilesystemTypeBasic, "."), db)
 
 	// The contents of the database are like this:
 	//
@@ -272,4 +272,13 @@ func TestDowngrade(t *testing.T) {
 	} else if err.minSyncthingVersion != dbMinSyncthingVersion {
 		t.Fatalf("Error has %v as min Syncthing version, expected %v", err.minSyncthingVersion, dbMinSyncthingVersion)
 	}
+}
+
+func newFileSet(t testing.TB, folder string, fs fs.Filesystem, ldb *Lowlevel) *FileSet {
+	t.Helper()
+	s, err := NewFileSet(folder, fs, ldb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
 }
