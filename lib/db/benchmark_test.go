@@ -145,7 +145,7 @@ func BenchmarkNeedHalf(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		count := 0
-		snap := benchS.Snapshot()
+		snap := snapshot(b, benchS)
 		snap.WithNeed(protocol.LocalDeviceID, func(fi db.FileIntf) bool {
 			count++
 			return true
@@ -169,7 +169,7 @@ func BenchmarkNeedHalfRemote(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		count := 0
-		snap := fset.Snapshot()
+		snap := snapshot(b, fset)
 		snap.WithNeed(remoteDevice0, func(fi db.FileIntf) bool {
 			count++
 			return true
@@ -190,7 +190,7 @@ func BenchmarkHave(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		count := 0
-		snap := benchS.Snapshot()
+		snap := snapshot(b, benchS)
 		snap.WithHave(protocol.LocalDeviceID, func(fi db.FileIntf) bool {
 			count++
 			return true
@@ -211,7 +211,7 @@ func BenchmarkGlobal(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		count := 0
-		snap := benchS.Snapshot()
+		snap := snapshot(b, benchS)
 		snap.WithGlobal(func(fi db.FileIntf) bool {
 			count++
 			return true
@@ -232,7 +232,7 @@ func BenchmarkNeedHalfTruncated(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		count := 0
-		snap := benchS.Snapshot()
+		snap := snapshot(b, benchS)
 		snap.WithNeedTruncated(protocol.LocalDeviceID, func(fi db.FileIntf) bool {
 			count++
 			return true
@@ -253,7 +253,7 @@ func BenchmarkHaveTruncated(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		count := 0
-		snap := benchS.Snapshot()
+		snap := snapshot(b, benchS)
 		snap.WithHaveTruncated(protocol.LocalDeviceID, func(fi db.FileIntf) bool {
 			count++
 			return true
@@ -274,7 +274,7 @@ func BenchmarkGlobalTruncated(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		count := 0
-		snap := benchS.Snapshot()
+		snap := snapshot(b, benchS)
 		snap.WithGlobalTruncated(func(fi db.FileIntf) bool {
 			count++
 			return true
