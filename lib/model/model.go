@@ -2236,7 +2236,9 @@ func (m *model) generateClusterConfig(device protocol.DeviceID) (protocol.Cluste
 					protocolDevice.IndexID, err = fs.IndexID(deviceCfg.DeviceID)
 					protocolDevice.MaxSequence = fs.Sequence(deviceCfg.DeviceID)
 				}
-				return protocol.ClusterConfig{}, err
+				if err != nil {
+					return protocol.ClusterConfig{}, err
+				}
 			}
 
 			protocolFolder.Devices = append(protocolFolder.Devices, protocolDevice)
