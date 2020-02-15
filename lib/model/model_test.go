@@ -414,7 +414,10 @@ func TestClusterConfig(t *testing.T) {
 	}
 	defer cleanupModel(m)
 
-	cm := m.generateClusterConfig(device2)
+	cm, err := m.generateClusterConfig(device2)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if l := len(cm.Folders); l != 2 {
 		t.Fatalf("Incorrect number of folders %d != 2", l)
@@ -852,7 +855,10 @@ func TestIssue4897(t *testing.T) {
 	})
 	defer cleanupModel(m)
 
-	cm := m.generateClusterConfig(device1)
+	cm, err := m.generateClusterConfig(device1)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if l := len(cm.Folders); l != 1 {
 		t.Errorf("Cluster config contains %v folders, expected 1", l)
 	}
@@ -2439,7 +2445,7 @@ func TestIssue3496(t *testing.T) {
 	fs := m.folderFiles["default"]
 	m.fmut.RUnlock()
 	var localFiles []protocol.FileInfo
-	snap := fs.Snapshot()
+	snap := snapshot(t, fs)
 	snap.WithHave(protocol.LocalDeviceID, func(i db.FileIntf) bool {
 		localFiles = append(localFiles, i.(protocol.FileInfo))
 		return true
@@ -2619,12 +2625,12 @@ func TestIssue2571(t *testing.T) {
 
 	m.ScanFolder("default")
 
-	if dir, ok := m.CurrentFolderFile("default", "toLink"); !ok {
+	if dir, ok := currentFolderFile(t, m, "default", "toLink"); !ok {
 		t.Fatalf("Dir missing in db")
 	} else if !dir.IsSymlink() {
 		t.Errorf("Dir wasn't changed to symlink")
 	}
-	if file, ok := m.CurrentFolderFile("default", filepath.Join("toLink", "a")); !ok {
+	if file, ok := currentFolderFile(t, m, "default", filepath.Join("toLink", "a")); !ok {
 		t.Fatalf("File missing in db")
 	} else if !file.Deleted {
 		t.Errorf("File below symlink has not been marked as deleted")
@@ -2656,7 +2662,7 @@ func TestIssue4573(t *testing.T) {
 
 	m.ScanFolder("default")
 
-	if file, ok := m.CurrentFolderFile("default", file); !ok {
+	if file, ok := currentFolderFile(t, m, "default", file); !ok {
 		t.Fatalf("File missing in db")
 	} else if file.Deleted {
 		t.Errorf("Inaccessible file has been marked as deleted.")
@@ -2715,7 +2721,7 @@ func TestInternalScan(t *testing.T) {
 	m.ScanFolder("default")
 
 	for path, cond := range testCases {
-		if f, ok := m.CurrentFolderFile("default", path); !ok {
+		if f, ok := currentFolderFile(t, m, "default", path); !ok {
 			t.Fatalf("%v missing in db", path)
 		} else if cond(f) {
 			t.Errorf("Incorrect db entry for %v", path)
@@ -2780,14 +2786,14 @@ func TestRemoveDirWithContent(t *testing.T) {
 	m := setupModel(t, defaultCfgWrapper)
 	defer cleanupModel(m)
 
-	dir, ok := m.CurrentFolderFile("default", "dirwith")
+	dir, ok := currentFolderFile(t, m, "default", "dirwith")
 	if !ok {
 		t.Fatalf("Can't get dir \"dirwith\" after initial scan")
 	}
 	dir.Deleted = true
 	dir.Version = dir.Version.Update(device1.Short()).Update(device1.Short())
 
-	file, ok := m.CurrentFolderFile("default", content)
+	file, ok := currentFolderFile(t, m, "default", content)
 	if !ok {
 		t.Fatalf("Can't get file \"%v\" after initial scan", content)
 	}
@@ -2799,11 +2805,11 @@ func TestRemoveDirWithContent(t *testing.T) {
 	// Is there something we could trigger on instead of just waiting?
 	timeout := time.NewTimer(5 * time.Second)
 	for {
-		dir, ok := m.CurrentFolderFile("default", "dirwith")
+		dir, ok := currentFolderFile(t, m, "default", "dirwith")
 		if !ok {
 			t.Fatalf("Can't get dir \"dirwith\" after index update")
 		}
-		file, ok := m.CurrentFolderFile("default", content)
+		file, ok := currentFolderFile(t, m, "default", content)
 		if !ok {
 			t.Fatalf("Can't get file \"%v\" after index update", content)
 		}
@@ -2854,11 +2860,11 @@ func TestIssue4475(t *testing.T) {
 	created := false
 	for {
 		if !created {
-			if _, ok := m.CurrentFolderFile("default", fileName); ok {
+			if _, ok := currentFolderFile(t, m, "default", fileName); ok {
 				created = true
 			}
 		} else {
-			dir, ok := m.CurrentFolderFile("default", "delDir")
+			dir, ok := currentFolderFile(t, m, "default", "delDir")
 			if !ok {
 				t.Fatalf("can't get dir from db")
 			}
@@ -3182,7 +3188,7 @@ func TestIssue5002(t *testing.T) {
 		t.Error(err)
 	}
 
-	file, ok := m.CurrentFolderFile("default", "foo")
+	file, ok := currentFolderFile(t, m, "default", "foo")
 	if !ok {
 		t.Fatal("test file should exist")
 	}
@@ -3200,7 +3206,7 @@ func TestParentOfUnignored(t *testing.T) {
 
 	m.SetIgnores("default", []string{"!quux", "*"})
 
-	if parent, ok := m.CurrentFolderFile("default", "baz"); !ok {
+	if parent, ok := currentFolderFile(t, m, "default", "baz"); !ok {
 		t.Errorf(`Directory "baz" missing in db`)
 	} else if parent.IsIgnored() {
 		t.Errorf(`Directory "baz" is ignored`)
@@ -3377,7 +3383,7 @@ func TestModTimeWindow(t *testing.T) {
 
 	v := protocol.Vector{}
 	v = v.Update(myID.Short())
-	fi, ok := m.CurrentFolderFile("default", name)
+	fi, ok := currentFolderFile(t, m, "default", name)
 	if !ok {
 		t.Fatal("File missing")
 	}
@@ -3391,7 +3397,7 @@ func TestModTimeWindow(t *testing.T) {
 	m.ScanFolders()
 
 	// No change due to window
-	fi, _ = m.CurrentFolderFile("default", name)
+	fi, _ = currentFolderFile(t, m, "default", name)
 	if !fi.Version.Equal(v) {
 		t.Fatalf("Got version %v, expected %v", fi.Version, v)
 	}
@@ -3402,7 +3408,7 @@ func TestModTimeWindow(t *testing.T) {
 	m.ScanFolders()
 
 	v = v.Update(myID.Short())
-	fi, _ = m.CurrentFolderFile("default", name)
+	fi, _ = currentFolderFile(t, m, "default", name)
 	if !fi.Version.Equal(v) {
 		t.Fatalf("Got version %v, expected %v", fi.Version, v)
 	}

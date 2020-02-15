@@ -229,9 +229,27 @@ func (f *testFailer) Fail() {
 
 func newFileSet(t testing.TB, folder string, fs fs.Filesystem, ldb *db.Lowlevel) *db.FileSet {
 	t.Helper()
-	s, err := db.NewFileSet(folder, fs, ldb)
+	s, err := db.NewFileSet(folder, fs, ldb, func(err error) { t.Fatal(err) })
 	if err != nil {
 		t.Fatal(err)
 	}
 	return s
+}
+
+func snapshot(t testing.TB, fs *db.FileSet) *db.Snapshot {
+	t.Helper()
+	snap, err := fs.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snap
+}
+
+func currentFolderFile(t testing.TB, m Model, folder, file string) (protocol.FileInfo, bool) {
+	t.Helper()
+	f, ok, err := m.CurrentFolderFile(folder, file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f, ok
 }

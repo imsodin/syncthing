@@ -47,7 +47,7 @@ func TestRecvOnlyRevertDeletes(t *testing.T) {
 	f.updateLocalsFromScanning(knownFiles)
 
 	m.fmut.RLock()
-	snap := m.folderFiles["ro"].Snapshot()
+	snap := snapshot(t, m.folderFiles["ro"])
 	m.fmut.RUnlock()
 	size := snap.GlobalSize()
 	snap.Release()
