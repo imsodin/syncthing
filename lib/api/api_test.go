@@ -9,6 +9,7 @@ package api
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -35,7 +36,7 @@ import (
 	"github.com/syncthing/syncthing/lib/tlsutil"
 	"github.com/syncthing/syncthing/lib/ur"
 	"github.com/syncthing/syncthing/lib/util"
-	"github.com/thejerf/suture"
+	"github.com/thejerf/suture/v4"
 )
 
 var (
@@ -115,7 +116,8 @@ func TestStopAfterBrokenConfig(t *testing.T) {
 
 	sup := suture.New("test", util.Spec())
 	sup.Add(srv)
-	sup.ServeBackground()
+	ctx, cancel := context.WithCancel(context.Background())
+	sup.ServeBackground(ctx)
 
 	<-srv.started
 
@@ -133,9 +135,7 @@ func TestStopAfterBrokenConfig(t *testing.T) {
 		t.Fatal("Verify config should have failed")
 	}
 
-	// Nonetheless, it should be fine to Stop() it without panic.
-
-	sup.Stop()
+	cancel()
 }
 
 func TestAssetsDir(t *testing.T) {
@@ -244,11 +244,11 @@ func TestAPIServiceRequests(t *testing.T) {
 	const testAPIKey = "foobarbaz"
 	cfg := new(mockedConfig)
 	cfg.gui.APIKey = testAPIKey
-	baseURL, sup, err := startHTTP(cfg)
+	baseURL, cancel, err := startHTTP(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sup.Stop()
+	defer cancel()
 
 	cases := []httpTestCase{
 		// /rest/db
@@ -457,11 +457,11 @@ func TestHTTPLogin(t *testing.T) {
 	cfg := new(mockedConfig)
 	cfg.gui.User = "üser"
 	cfg.gui.Password = "$2a$10$IdIZTxTg/dCNuNEGlmLynOjqg4B1FvDKuIV5e0BB3pnWVHNb8.GSq" // bcrypt of "räksmörgås" in UTF-8
-	baseURL, sup, err := startHTTP(cfg)
+	baseURL, cancel, err := startHTTP(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sup.Stop()
+	defer cancel()
 
 	// Verify rejection when not using authorization
 
@@ -519,7 +519,7 @@ func TestHTTPLogin(t *testing.T) {
 	}
 }
 
-func startHTTP(cfg *mockedConfig) (string, *suture.Supervisor, error) {
+func startHTTP(cfg *mockedConfig) (string, context.CancelFunc, error) {
 	m := new(mockedModel)
 	assetDir := "../../gui"
 	eventSub := new(mockedEventSub)
@@ -541,14 +541,15 @@ func startHTTP(cfg *mockedConfig) (string, *suture.Supervisor, error) {
 		PassThroughPanics: true,
 	})
 	supervisor.Add(svc)
-	supervisor.ServeBackground()
+	ctx, cancel := context.WithCancel(context.Background())
+	supervisor.ServeBackground(ctx)
 
 	// Make sure the API service is listening, and get the URL to use.
 	addr := <-addrChan
 	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
 	if err != nil {
-		supervisor.Stop()
-		return "", nil, fmt.Errorf("weird address from API service: %w", err)
+		cancel()
+		return "", cancel, fmt.Errorf("weird address from API service: %w", err)
 	}
 
 	host, _, _ := net.SplitHostPort(cfg.gui.RawAddress)
@@ -557,7 +558,7 @@ func startHTTP(cfg *mockedConfig) (string, *suture.Supervisor, error) {
 	}
 	baseURL := fmt.Sprintf("http://%s", net.JoinHostPort(host, strconv.Itoa(tcpAddr.Port)))
 
-	return baseURL, supervisor, nil
+	return baseURL, cancel, nil
 }
 
 func TestCSRFRequired(t *testing.T) {
@@ -566,11 +567,11 @@ func TestCSRFRequired(t *testing.T) {
 	const testAPIKey = "foobarbaz"
 	cfg := new(mockedConfig)
 	cfg.gui.APIKey = testAPIKey
-	baseURL, sup, err := startHTTP(cfg)
+	baseURL, cancel, err := startHTTP(cfg)
 	if err != nil {
 		t.Fatal("Unexpected error from getting base URL:", err)
 	}
-	defer sup.Stop()
+	defer cancel()
 
 	cli := &http.Client{
 		Timeout: time.Minute,
@@ -642,11 +643,11 @@ func TestRandomString(t *testing.T) {
 	const testAPIKey = "foobarbaz"
 	cfg := new(mockedConfig)
 	cfg.gui.APIKey = testAPIKey
-	baseURL, sup, err := startHTTP(cfg)
+	baseURL, cancel, err := startHTTP(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sup.Stop()
+	defer cancel()
 	cli := &http.Client{
 		Timeout: time.Second,
 	}
@@ -735,11 +736,11 @@ func testConfigPost(data io.Reader) (*http.Response, error) {
 	const testAPIKey = "foobarbaz"
 	cfg := new(mockedConfig)
 	cfg.gui.APIKey = testAPIKey
-	baseURL, sup, err := startHTTP(cfg)
+	baseURL, cancel, err := startHTTP(cfg)
 	if err != nil {
 		return nil, err
 	}
-	defer sup.Stop()
+	defer cancel()
 	cli := &http.Client{
 		Timeout: time.Second,
 	}
@@ -756,11 +757,11 @@ func TestHostCheck(t *testing.T) {
 
 	cfg := new(mockedConfig)
 	cfg.gui.RawAddress = "127.0.0.1:0"
-	baseURL, sup, err := startHTTP(cfg)
+	baseURL, cancel, err := startHTTP(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sup.Stop()
+	defer cancel()
 
 	// A normal HTTP get to the localhost-bound service should succeed
 
@@ -817,11 +818,11 @@ func TestHostCheck(t *testing.T) {
 	cfg = new(mockedConfig)
 	cfg.gui.RawAddress = "127.0.0.1:0"
 	cfg.gui.InsecureSkipHostCheck = true
-	baseURL, sup, err = startHTTP(cfg)
+	baseURL, cancel, err = startHTTP(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sup.Stop()
+	defer cancel()
 
 	// A request with a suspicious Host header should be allowed
 
@@ -841,11 +842,11 @@ func TestHostCheck(t *testing.T) {
 	cfg = new(mockedConfig)
 	cfg.gui.RawAddress = "0.0.0.0:0"
 	cfg.gui.InsecureSkipHostCheck = true
-	baseURL, sup, err = startHTTP(cfg)
+	baseURL, cancel, err = startHTTP(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sup.Stop()
+	defer cancel()
 
 	// A request with a suspicious Host header should be allowed
 
@@ -869,11 +870,11 @@ func TestHostCheck(t *testing.T) {
 
 	cfg = new(mockedConfig)
 	cfg.gui.RawAddress = "[::1]:0"
-	baseURL, sup, err = startHTTP(cfg)
+	baseURL, cancel, err = startHTTP(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sup.Stop()
+	defer cancel()
 
 	// A normal HTTP get to the localhost-bound service should succeed
 
@@ -964,11 +965,11 @@ func TestAccessControlAllowOriginHeader(t *testing.T) {
 	const testAPIKey = "foobarbaz"
 	cfg := new(mockedConfig)
 	cfg.gui.APIKey = testAPIKey
-	baseURL, sup, err := startHTTP(cfg)
+	baseURL, cancel, err := startHTTP(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sup.Stop()
+	defer cancel()
 	cli := &http.Client{
 		Timeout: time.Second,
 	}
@@ -995,11 +996,11 @@ func TestOptionsRequest(t *testing.T) {
 	const testAPIKey = "foobarbaz"
 	cfg := new(mockedConfig)
 	cfg.gui.APIKey = testAPIKey
-	baseURL, sup, err := startHTTP(cfg)
+	baseURL, cancel, err := startHTTP(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sup.Stop()
+	defer cancel()
 	cli := &http.Client{
 		Timeout: time.Second,
 	}

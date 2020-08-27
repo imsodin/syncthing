@@ -21,7 +21,7 @@ import (
 	"github.com/syncthing/syncthing/lib/sha256"
 	"github.com/syncthing/syncthing/lib/sync"
 	"github.com/syncthing/syncthing/lib/util"
-	"github.com/thejerf/suture"
+	"github.com/thejerf/suture/v4"
 )
 
 const (
@@ -572,7 +572,7 @@ func (db *Lowlevel) dropPrefix(prefix []byte) error {
 	return t.Commit()
 }
 
-func (db *Lowlevel) gcRunner(ctx context.Context) {
+func (db *Lowlevel) gcRunner(ctx context.Context) error {
 	// Calculate the time for the next GC run. Even if we should run GC
 	// directly, give the system a while to get up and running and do other
 	// stuff first. (We might have migrations and stuff which would be
@@ -588,7 +588,7 @@ func (db *Lowlevel) gcRunner(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case <-t.C:
 			if err := db.gcIndirect(ctx); err != nil {
 				l.Warnln("Database indirection GC failed:", err)

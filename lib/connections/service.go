@@ -31,7 +31,7 @@ import (
 	_ "github.com/syncthing/syncthing/lib/upnp"
 
 	"github.com/pkg/errors"
-	"github.com/thejerf/suture"
+	"github.com/thejerf/suture/v4"
 	"golang.org/x/time/rate"
 )
 
@@ -188,21 +188,20 @@ func NewService(cfg config.Wrapper, myID protocol.DeviceID, mdl Model, tlsCfg *t
 	service.Add(service.listenerSupervisor)
 	service.Add(service.natService)
 
+	util.OnSupervisorDone(service.Supervisor, func() {
+		service.cfg.Unsubscribe(service.limiter)
+		service.cfg.Unsubscribe(service)
+	})
+
 	return service
 }
 
-func (s *service) Stop() {
-	s.cfg.Unsubscribe(s.limiter)
-	s.cfg.Unsubscribe(s)
-	s.Supervisor.Stop()
-}
-
-func (s *service) handle(ctx context.Context) {
+func (s *service) handle(ctx context.Context) error {
 	var c internalConn
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case c = <-s.conns:
 		}
 
@@ -331,9 +330,10 @@ func (s *service) handle(ctx context.Context) {
 		s.model.AddConnection(modelConn, hello)
 		continue
 	}
+	return nil
 }
 
-func (s *service) connect(ctx context.Context) {
+func (s *service) connect(ctx context.Context) error {
 	nextDial := make(map[string]time.Time)
 
 	// Used as delay for the first few connection attempts, increases
@@ -364,7 +364,7 @@ func (s *service) connect(ctx context.Context) {
 		for _, deviceCfg := range cfg.Devices {
 			select {
 			case <-ctx.Done():
-				return
+				return nil
 			default:
 			}
 
@@ -496,9 +496,10 @@ func (s *service) connect(ctx context.Context) {
 		select {
 		case <-time.After(sleep):
 		case <-ctx.Done():
-			return
+			return nil
 		}
 	}
+	return nil
 }
 
 func (s *service) isLANHost(host string) bool {

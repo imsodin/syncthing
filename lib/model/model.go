@@ -21,7 +21,7 @@ import (
 	"unicode"
 
 	"github.com/pkg/errors"
-	"github.com/thejerf/suture"
+	"github.com/thejerf/suture/v4"
 
 	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/connections"
@@ -46,6 +46,7 @@ const (
 )
 
 type service interface {
+	suture.Service
 	BringToFront(string)
 	Override()
 	Revert()
@@ -53,8 +54,6 @@ type service interface {
 	SchedulePull()                                    // something relevant changed, we should try a pull
 	Jobs(page, perpage int) ([]string, []string, int) // In progress, Queued, skipped
 	Scan(subs []string) error
-	Serve()
-	Stop()
 	Errors() []FileError
 	WatchError() error
 	ScheduleForceRescan(path string)
@@ -226,21 +225,12 @@ func NewModel(cfg config.Wrapper, id protocol.DeviceID, clientName, clientVersio
 		m.deviceStatRefs[devID] = stats.NewDeviceStatisticsReference(m.db, devID.String())
 	}
 	m.Add(m.progressEmitter)
+	m.Add(util.AsService(m.serve, m.String()))
 
 	return m
 }
 
-func (m *model) Serve() {
-	m.onServe()
-	m.Supervisor.Serve()
-}
-
-func (m *model) ServeBackground() {
-	m.onServe()
-	m.Supervisor.ServeBackground()
-}
-
-func (m *model) onServe() {
+func (m *model) serve(ctx context.Context) error {
 	// Add and start folders
 	cacheIgnoredFiles := m.cfg.Options().CacheIgnoredFiles
 	for _, folderCfg := range m.cfg.Folders() {
@@ -251,11 +241,10 @@ func (m *model) onServe() {
 		m.newFolder(folderCfg, cacheIgnoredFiles)
 	}
 	m.cfg.Subscribe(m)
-}
 
-func (m *model) Stop() {
+	<-ctx.Done()
+
 	m.cfg.Unsubscribe(m)
-	m.Supervisor.Stop()
 	devs := m.cfg.Devices()
 	ids := make([]protocol.DeviceID, 0, len(devs))
 	for id := range devs {
@@ -263,6 +252,7 @@ func (m *model) Stop() {
 	}
 	w := m.closeConns(ids, errStopped)
 	w.Wait()
+	return nil
 }
 
 // StartDeadlockDetector starts a deadlock detector on the models locks which
@@ -1143,7 +1133,6 @@ func (m *model) ClusterConfig(deviceID protocol.DeviceID, cm protocol.ClusterCon
 			prevSequence: startSequence,
 			evLogger:     m.evLogger,
 		}
-		is.Service = util.AsService(is.serve, is.String())
 		// The token isn't tracked as the service stops when the connection
 		// terminates and is automatically removed from supervisor (by
 		// implementing suture.IsCompletable).
@@ -1904,7 +1893,6 @@ func (m *model) deviceWasSeen(deviceID protocol.DeviceID) {
 }
 
 type indexSender struct {
-	suture.Service
 	conn         protocol.Connection
 	folder       string
 	dev          string
@@ -1914,7 +1902,7 @@ type indexSender struct {
 	connClosed   chan struct{}
 }
 
-func (s *indexSender) serve(ctx context.Context) {
+func (s *indexSender) Serve(ctx context.Context) error {
 	var err error
 
 	l.Debugf("Starting indexSender for %s to %s at %s (slv=%d)", s.folder, s.dev, s.conn, s.prevSequence)
@@ -1936,9 +1924,9 @@ func (s *indexSender) serve(ctx context.Context) {
 	for err == nil {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case <-s.connClosed:
-			return
+			return nil
 		default:
 		}
 
@@ -1949,9 +1937,9 @@ func (s *indexSender) serve(ctx context.Context) {
 		if s.fset.Sequence(protocol.LocalDeviceID) <= s.prevSequence {
 			select {
 			case <-ctx.Done():
-				return
+				return nil
 			case <-s.connClosed:
-				return
+				return nil
 			case <-evChan:
 			case <-ticker.C:
 			}
@@ -1966,6 +1954,8 @@ func (s *indexSender) serve(ctx context.Context) {
 		// time to batch them up a little.
 		time.Sleep(250 * time.Millisecond)
 	}
+
+	return err
 }
 
 // Complete implements the suture.IsCompletable interface. When Serve terminates

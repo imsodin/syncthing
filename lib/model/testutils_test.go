@@ -7,6 +7,7 @@
 package model
 
 import (
+	"context"
 	"io/ioutil"
 	"os"
 	"testing"
@@ -94,13 +95,13 @@ func testFolderConfigFake() config.FolderConfiguration {
 	return cfg
 }
 
-func setupModelWithConnection() (*model, *fakeConnection, config.FolderConfiguration) {
+func setupModelWithConnection() (*testModel, *fakeConnection, config.FolderConfiguration) {
 	w, fcfg := tmpDefaultWrapper()
 	m, fc := setupModelWithConnectionFromWrapper(w)
 	return m, fc, fcfg
 }
 
-func setupModelWithConnectionFromWrapper(w config.Wrapper) (*model, *fakeConnection) {
+func setupModelWithConnectionFromWrapper(w config.Wrapper) (*testModel, *fakeConnection) {
 	m := setupModel(w)
 
 	fc := addFakeConn(m, device1)
@@ -111,7 +112,7 @@ func setupModelWithConnectionFromWrapper(w config.Wrapper) (*model, *fakeConnect
 	return m, fc
 }
 
-func setupModel(w config.Wrapper) *model {
+func setupModel(w config.Wrapper) *testModel {
 	db := db.NewLowlevel(backend.OpenMemory())
 	m := newModel(w, myID, "syncthing", "dev", db, nil)
 	m.ServeBackground()
@@ -121,21 +122,46 @@ func setupModel(w config.Wrapper) *model {
 	return m
 }
 
-func newModel(cfg config.Wrapper, id protocol.DeviceID, clientName, clientVersion string, ldb *db.Lowlevel, protectedFiles []string) *model {
-	evLogger := events.NewLogger()
-	m := NewModel(cfg, id, clientName, clientVersion, ldb, protectedFiles, evLogger).(*model)
-	go evLogger.Serve()
-	return m
+type testModel struct {
+	*model
+	cancel   context.CancelFunc
+	evCancel context.CancelFunc
+	stopped  chan struct{}
 }
 
-func cleanupModel(m *model) {
-	m.Stop()
+func newModel(cfg config.Wrapper, id protocol.DeviceID, clientName, clientVersion string, ldb *db.Lowlevel, protectedFiles []string) *testModel {
+	evLogger := events.NewLogger()
+	m := NewModel(cfg, id, clientName, clientVersion, ldb, protectedFiles, evLogger).(*model)
+	ctx, cancel := context.WithCancel(context.Background())
+	go evLogger.Serve(ctx)
+	return &testModel{
+		model:    m,
+		evCancel: cancel,
+		stopped:  make(chan struct{}),
+	}
+}
+
+func (m *testModel) ServeBackground() {
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
+	go func() {
+		m.model.Serve(ctx)
+		close(m.stopped)
+	}()
+	time.Sleep(10 * time.Millisecond) // Let model wire itself on Serve
+}
+
+func cleanupModel(m *testModel) {
+	if m.cancel != nil {
+		m.cancel()
+		<-m.stopped
+	}
+	m.evCancel()
 	m.db.Close()
-	m.evLogger.Stop()
 	os.Remove(m.cfg.ConfigPath())
 }
 
-func cleanupModelAndRemoveDir(m *model, dir string) {
+func cleanupModelAndRemoveDir(m *testModel, dir string) {
 	cleanupModel(m)
 	os.RemoveAll(dir)
 }
@@ -222,7 +248,7 @@ func dbSnapshot(t *testing.T, m Model, folder string) *db.Snapshot {
 // reloads when asked to, instead of checking file mtimes. This is
 // because we will be changing the files on disk often enough that the
 // mtimes will be unreliable to determine change status.
-func folderIgnoresAlwaysReload(m *model, fcfg config.FolderConfiguration) {
+func folderIgnoresAlwaysReload(m *testModel, fcfg config.FolderConfiguration) {
 	m.removeFolder(fcfg)
 	fset := db.NewFileSet(fcfg.ID, fcfg.Filesystem(), m.db)
 	ignores := ignore.New(fcfg.Filesystem(), ignore.WithCache(true), ignore.WithChangeDetector(newAlwaysChanged()))

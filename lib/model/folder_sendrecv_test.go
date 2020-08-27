@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/syncthing/syncthing/lib/config"
+	"github.com/syncthing/syncthing/lib/db"
+	"github.com/syncthing/syncthing/lib/db/backend"
 	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/ignore"
@@ -91,10 +93,13 @@ func createFile(t *testing.T, name string, fs fs.Filesystem) protocol.FileInfo {
 }
 
 // Sets up a folder and model, but makes sure the services aren't actually running.
-func setupSendReceiveFolder(files ...protocol.FileInfo) (*model, *sendReceiveFolder) {
+func setupSendReceiveFolder(files ...protocol.FileInfo) (*testModel, *sendReceiveFolder) {
 	w, fcfg := tmpDefaultWrapper()
-	model := setupModel(w)
-	model.Supervisor.Stop()
+	model := newModel(w, myID, "syncthing", "dev", db.NewLowlevel(backend.OpenMemory()), nil)
+	// Initialise model and stop immediately.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	model.serve(ctx)
 	f := model.folderRunners[fcfg.ID].(*sendReceiveFolder)
 	f.pullErrors = make(map[string]string)
 	f.tempPullErrors = make(map[string]string)
@@ -108,8 +113,7 @@ func setupSendReceiveFolder(files ...protocol.FileInfo) (*model, *sendReceiveFol
 	return model, f
 }
 
-func cleanupSRFolder(f *sendReceiveFolder, m *model) {
-	m.evLogger.Stop()
+func cleanupSRFolder(f *sendReceiveFolder, m *testModel) {
 	os.Remove(m.cfg.ConfigPath())
 	os.RemoveAll(f.Filesystem().URI())
 }

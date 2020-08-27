@@ -15,10 +15,9 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/thejerf/suture"
+	"github.com/thejerf/suture/v4"
 
 	"github.com/syncthing/syncthing/lib/sync"
-	"github.com/syncthing/syncthing/lib/util"
 )
 
 type EventType int
@@ -214,7 +213,6 @@ type Logger interface {
 }
 
 type logger struct {
-	suture.Service
 	subs                []*subscription
 	nextSubscriptionIDs []int
 	nextGlobalID        int
@@ -262,7 +260,6 @@ func NewLogger() Logger {
 		funcs:         make(chan func(context.Context)),
 		toUnsubscribe: make(chan *subscription),
 	}
-	l.Service = util.AsService(l.serve, l.String())
 	// Make sure the timer is in the stopped state and hasn't fired anything
 	// into the channel.
 	if !l.timeout.Stop() {
@@ -271,7 +268,7 @@ func NewLogger() Logger {
 	return l
 }
 
-func (l *logger) serve(ctx context.Context) {
+func (l *logger) Serve(ctx context.Context) error {
 loop:
 	for {
 		select {
@@ -297,6 +294,8 @@ loop:
 	for _, s := range l.subs {
 		close(s.events)
 	}
+
+	return nil
 }
 
 func (l *logger) Log(t EventType, data interface{}) {
@@ -530,7 +529,7 @@ type noopLogger struct{}
 
 var NoopLogger Logger = &noopLogger{}
 
-func (*noopLogger) Serve() {}
+func (*noopLogger) Serve(ctx context.Context) error { return nil }
 
 func (*noopLogger) Stop() {}
 

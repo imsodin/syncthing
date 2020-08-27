@@ -19,7 +19,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/thejerf/suture"
+	"github.com/thejerf/suture/v4"
 
 	"github.com/syncthing/syncthing/lib/api"
 	"github.com/syncthing/syncthing/lib/build"
@@ -79,18 +79,18 @@ type Options struct {
 }
 
 type App struct {
-	myID        protocol.DeviceID
-	mainService *suture.Supervisor
-	cfg         config.Wrapper
-	ll          *db.Lowlevel
-	evLogger    events.Logger
-	cert        tls.Certificate
-	opts        Options
-	exitStatus  ExitStatus
-	err         error
-	stopOnce    sync.Once
-	stop        chan struct{}
-	stopped     chan struct{}
+	myID              protocol.DeviceID
+	mainService       *suture.Supervisor
+	cfg               config.Wrapper
+	ll                *db.Lowlevel
+	evLogger          events.Logger
+	cert              tls.Certificate
+	opts              Options
+	exitStatus        ExitStatus
+	err               error
+	stopOnce          sync.Once
+	mainServiceCancel context.CancelFunc
+	stopped           chan struct{}
 }
 
 func New(cfg config.Wrapper, dbBackend backend.Backend, evLogger events.Logger, cert tls.Certificate, opts Options) *App {
@@ -100,7 +100,6 @@ func New(cfg config.Wrapper, dbBackend backend.Backend, evLogger events.Logger, 
 		evLogger: evLogger,
 		opts:     opts,
 		cert:     cert,
-		stop:     make(chan struct{}),
 		stopped:  make(chan struct{}),
 	}
 	close(a.stopped) // Hasn't been started, so shouldn't block on Wait.
@@ -121,8 +120,9 @@ func (a *App) Start() error {
 
 	// Start the supervisor and wait for it to stop to handle cleanup.
 	a.stopped = make(chan struct{})
-	a.mainService.ServeBackground()
-	go a.run()
+	ctx, cancel := context.WithCancel(context.Background())
+	a.mainServiceCancel = cancel
+	go a.run(ctx)
 
 	if err := a.startup(); err != nil {
 		a.stopWithErr(ExitError, err)
@@ -347,14 +347,13 @@ func (a *App) startup() error {
 	return nil
 }
 
-func (a *App) run() {
-	<-a.stop
-
-	if shouldDebug() {
-		l.Debugln("Services before stop:")
-		printServiceTree(os.Stdout, a.mainService, 0)
+func (a *App) run(ctx context.Context) {
+	switch err := a.mainService.Serve(ctx); err {
+	case nil, context.Canceled:
+	default:
+		a.err = err
+		a.exitStatus = ExitError
 	}
-	a.mainService.Stop()
 
 	done := make(chan struct{})
 	go func() {
@@ -383,7 +382,7 @@ func (a *App) Wait() ExitStatus {
 // for the app to stop before returning.
 func (a *App) Error() error {
 	select {
-	case <-a.stop:
+	case <-a.stopped:
 		return a.err
 	default:
 	}
@@ -400,7 +399,11 @@ func (a *App) stopWithErr(stopReason ExitStatus, err error) ExitStatus {
 	a.stopOnce.Do(func() {
 		a.exitStatus = stopReason
 		a.err = err
-		close(a.stop)
+		if shouldDebug() {
+			l.Debugln("Services before stop:")
+			printServiceTree(os.Stdout, a.mainService, 0)
+		}
+		a.mainServiceCancel()
 	})
 	<-a.stopped
 	return a.exitStatus
