@@ -29,9 +29,9 @@ type configHandler struct {
 	mut sync.Mutex
 }
 
-func newConfigHandler(id protocol.DeviceID, cfg config.Wrapper) http.Handler {
+func registerConfigEndpoints(router *httprouter.Router, id protocol.DeviceID, cfg config.Wrapper) {
 	c := &configHandler{
-		Router: httprouter.New(),
+		Router: router,
 		id:     id,
 		cfg:    cfg,
 		mut:    sync.NewMutex(),
@@ -46,8 +46,6 @@ func newConfigHandler(id protocol.DeviceID, cfg config.Wrapper) http.Handler {
 	c.registerOptions()
 	c.registerLDAP()
 	c.registerGUI()
-
-	return c
 }
 
 func (c *configHandler) registerConfig() {
