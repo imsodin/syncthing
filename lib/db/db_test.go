@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/syncthing/syncthing/lib/db/backend"
+	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/protocol"
 )
@@ -36,7 +37,7 @@ func TestIgnoredFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db := NewLowlevel(ldb)
+	db := newLowlevel(ldb)
 	defer db.Close()
 	if err := UpdateSchema(db); err != nil {
 		t.Fatal(err)
@@ -165,7 +166,7 @@ func TestUpdate0to3(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	db := NewLowlevel(ldb)
+	db := newLowlevel(ldb)
 	defer db.Close()
 	updater := schemaUpdater{db}
 
@@ -294,7 +295,7 @@ func TestUpdate0to3(t *testing.T) {
 
 // TestRepairSequence checks that a few hand-crafted messed-up sequence entries get fixed.
 func TestRepairSequence(t *testing.T) {
-	db := NewLowlevel(backend.OpenMemory())
+	db := newLowlevelMemory()
 	defer db.Close()
 
 	folderStr := "test"
@@ -467,7 +468,7 @@ func TestRepairSequence(t *testing.T) {
 }
 
 func TestDowngrade(t *testing.T) {
-	db := NewLowlevel(backend.OpenMemory())
+	db := newLowlevelMemory()
 	defer db.Close()
 	// sets the min version etc
 	if err := UpdateSchema(db); err != nil {
@@ -492,7 +493,7 @@ func TestDowngrade(t *testing.T) {
 }
 
 func TestCheckGlobals(t *testing.T) {
-	db := NewLowlevel(backend.OpenMemory())
+	db := newLowlevelMemory()
 	defer db.Close()
 
 	fs := NewFileSet("test", fs.NewFilesystem(fs.FilesystemTypeFake, ""), db)
@@ -533,7 +534,7 @@ func TestUpdateTo10(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db := NewLowlevel(ldb)
+	db := newLowlevel(ldb)
 	defer db.Close()
 
 	UpdateSchema(db)
@@ -644,9 +645,9 @@ func TestDropDuplicates(t *testing.T) {
 func TestGCIndirect(t *testing.T) {
 	// Verify that the gcIndirect run actually removes block lists.
 
-	db := NewLowlevel(backend.OpenMemory())
+	db := newLowlevelMemory()
 	defer db.Close()
-	meta := newMetadataTracker(db.keyer)
+	meta := newMetadataTracker(db.keyer, events.NoopLogger)
 
 	// Add three files with different block lists
 
@@ -732,7 +733,7 @@ func TestGCIndirect(t *testing.T) {
 }
 
 func TestUpdateTo14(t *testing.T) {
-	db := NewLowlevel(backend.OpenMemory())
+	db := newLowlevelMemory()
 	defer db.Close()
 
 	folderStr := "default"
@@ -806,7 +807,7 @@ func TestFlushRecursion(t *testing.T) {
 		t.Skip("Not supported on Badger")
 	}
 
-	db := NewLowlevel(backend.OpenMemory())
+	db := newLowlevelMemory()
 	defer db.Close()
 
 	// A commit hook that writes a small piece of data to the transaction.
@@ -844,7 +845,7 @@ func TestFlushRecursion(t *testing.T) {
 }
 
 func TestCheckLocalNeed(t *testing.T) {
-	db := NewLowlevel(backend.OpenMemory())
+	db := newLowlevelMemory()
 	defer db.Close()
 
 	folderStr := "test"
@@ -919,7 +920,7 @@ func TestCheckLocalNeed(t *testing.T) {
 }
 
 func TestDuplicateNeedCount(t *testing.T) {
-	db := NewLowlevel(backend.OpenMemory())
+	db := newLowlevelMemory()
 	defer db.Close()
 
 	folder := "test"

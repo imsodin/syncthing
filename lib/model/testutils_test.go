@@ -112,8 +112,7 @@ func setupModelWithConnectionFromWrapper(w config.Wrapper) (*model, *fakeConnect
 }
 
 func setupModel(w config.Wrapper) *model {
-	db := db.NewLowlevel(backend.OpenMemory())
-	m := newModel(w, myID, "syncthing", "dev", db, nil)
+	m := newModel(w, myID, "syncthing", "dev", nil)
 	m.ServeBackground()
 
 	m.ScanFolders()
@@ -121,11 +120,11 @@ func setupModel(w config.Wrapper) *model {
 	return m
 }
 
-func newModel(cfg config.Wrapper, id protocol.DeviceID, clientName, clientVersion string, ldb *db.Lowlevel, protectedFiles []string) *model {
+func newModel(cfg config.Wrapper, id protocol.DeviceID, clientName, clientVersion string, protectedFiles []string) *model {
 	evLogger := events.NewLogger()
-	m := NewModel(cfg, id, clientName, clientVersion, ldb, protectedFiles, evLogger).(*model)
 	go evLogger.Serve()
-	return m
+	ldb := db.NewLowlevel(backend.OpenMemory(), evLogger)
+	return NewModel(cfg, id, clientName, clientVersion, ldb, protectedFiles, evLogger).(*model)
 }
 
 func cleanupModel(m *model) {

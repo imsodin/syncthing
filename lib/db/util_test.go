@@ -13,6 +13,7 @@ import (
 	// "testing"
 
 	"github.com/syncthing/syncthing/lib/db/backend"
+	"github.com/syncthing/syncthing/lib/events"
 	// "github.com/syncthing/syncthing/lib/fs"
 	// "github.com/syncthing/syncthing/lib/protocol"
 )
@@ -67,6 +68,14 @@ func openJSONS(file string) (backend.Backend, error) {
 	}
 
 	return db, nil
+}
+
+func newLowlevel(backend backend.Backend) *Lowlevel {
+	return NewLowlevel(backend, events.NoopLogger)
+}
+
+func newLowlevelMemory() *Lowlevel {
+	return newLowlevel(backend.OpenMemory())
 }
 
 // The following commented tests were used to generate jsons files to stdout for

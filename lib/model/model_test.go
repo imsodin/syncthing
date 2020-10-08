@@ -306,8 +306,7 @@ func TestDeviceRename(t *testing.T) {
 	}
 	cfg := config.Wrap("testdata/tmpconfig.xml", rawCfg, events.NoopLogger)
 
-	db := db.NewLowlevel(backend.OpenMemory())
-	m := newModel(cfg, myID, "syncthing", "dev", db, nil)
+	m := newModel(cfg, myID, "syncthing", "dev", nil)
 
 	if cfg.Devices()[device1].Name != "" {
 		t.Errorf("Device already has a name")
@@ -402,10 +401,8 @@ func TestClusterConfig(t *testing.T) {
 		},
 	}
 
-	db := db.NewLowlevel(backend.OpenMemory())
-
 	wrapper := createTmpWrapper(cfg)
-	m := newModel(wrapper, myID, "syncthing", "dev", db, nil)
+	m := newModel(wrapper, myID, "syncthing", "dev", nil)
 	m.ServeBackground()
 	defer cleanupModel(m)
 
@@ -1561,12 +1558,6 @@ func waitForState(t *testing.T, sub events.Subscription, folder, expected string
 func TestROScanRecovery(t *testing.T) {
 	testOs := &fatalOs{t}
 
-	ldb := db.NewLowlevel(backend.OpenMemory())
-	set := db.NewFileSet("default", defaultFs, ldb)
-	set.Update(protocol.LocalDeviceID, []protocol.FileInfo{
-		{Name: "dummyfile", Version: protocol.Vector{Counters: []protocol.Counter{{ID: 42, Value: 1}}}},
-	})
-
 	fcfg := config.FolderConfiguration{
 		ID:              "default",
 		Path:            "rotestfolder",
@@ -1582,10 +1573,15 @@ func TestROScanRecovery(t *testing.T) {
 			},
 		},
 	})
+	m := newModel(cfg, myID, "syncthing", "dev", nil)
+
+	set := db.NewFileSet("default", defaultFs, m.db)
+	set.Update(protocol.LocalDeviceID, []protocol.FileInfo{
+		{Name: "dummyfile", Version: protocol.Vector{Counters: []protocol.Counter{{ID: 42, Value: 1}}}},
+	})
 
 	testOs.RemoveAll(fcfg.Path)
 
-	m := newModel(cfg, myID, "syncthing", "dev", ldb, nil)
 	sub := m.evLogger.Subscribe(events.StateChanged)
 	defer sub.Unsubscribe()
 	m.ServeBackground()
@@ -1614,12 +1610,6 @@ func TestROScanRecovery(t *testing.T) {
 func TestRWScanRecovery(t *testing.T) {
 	testOs := &fatalOs{t}
 
-	ldb := db.NewLowlevel(backend.OpenMemory())
-	set := db.NewFileSet("default", defaultFs, ldb)
-	set.Update(protocol.LocalDeviceID, []protocol.FileInfo{
-		{Name: "dummyfile", Version: protocol.Vector{Counters: []protocol.Counter{{ID: 42, Value: 1}}}},
-	})
-
 	fcfg := config.FolderConfiguration{
 		ID:              "default",
 		Path:            "rwtestfolder",
@@ -1635,10 +1625,15 @@ func TestRWScanRecovery(t *testing.T) {
 			},
 		},
 	})
+	m := newModel(cfg, myID, "syncthing", "dev", nil)
 
 	testOs.RemoveAll(fcfg.Path)
 
-	m := newModel(cfg, myID, "syncthing", "dev", ldb, nil)
+	set := db.NewFileSet("default", defaultFs, m.db)
+	set.Update(protocol.LocalDeviceID, []protocol.FileInfo{
+		{Name: "dummyfile", Version: protocol.Vector{Counters: []protocol.Counter{{ID: 42, Value: 1}}}},
+	})
+
 	sub := m.evLogger.Subscribe(events.StateChanged)
 	defer sub.Unsubscribe()
 	m.ServeBackground()
@@ -2089,8 +2084,7 @@ func BenchmarkTree_100_10(b *testing.B) {
 }
 
 func benchmarkTree(b *testing.B, n1, n2 int) {
-	db := db.NewLowlevel(backend.OpenMemory())
-	m := newModel(defaultCfgWrapper, myID, "syncthing", "dev", db, nil)
+	m := newModel(defaultCfgWrapper, myID, "syncthing", "dev", nil)
 	m.ServeBackground()
 	defer cleanupModel(m)
 
@@ -2152,11 +2146,10 @@ func TestIssue3028(t *testing.T) {
 }
 
 func TestIssue4357(t *testing.T) {
-	db := db.NewLowlevel(backend.OpenMemory())
 	cfg := defaultCfgWrapper.RawCopy()
 	// Create a separate wrapper not to pollute other tests.
 	wrapper := createTmpWrapper(config.Configuration{})
-	m := newModel(wrapper, myID, "syncthing", "dev", db, nil)
+	m := newModel(wrapper, myID, "syncthing", "dev", nil)
 	m.ServeBackground()
 	defer cleanupModel(m)
 
@@ -2275,9 +2268,9 @@ func TestIssue2782(t *testing.T) {
 }
 
 func TestIndexesForUnknownDevicesDropped(t *testing.T) {
-	dbi := db.NewLowlevel(backend.OpenMemory())
+	m := newModel(defaultCfgWrapper, myID, "syncthing", "dev", nil)
 
-	files := db.NewFileSet("default", defaultFs, dbi)
+	files := db.NewFileSet("default", defaultFs, m.db)
 	files.Drop(device1)
 	files.Update(device1, genFiles(1))
 	files.Drop(device2)
@@ -2287,12 +2280,11 @@ func TestIndexesForUnknownDevicesDropped(t *testing.T) {
 		t.Error("expected two devices")
 	}
 
-	m := newModel(defaultCfgWrapper, myID, "syncthing", "dev", dbi, nil)
 	m.newFolder(defaultFolderConfig, false)
 	defer cleanupModel(m)
 
 	// Remote sequence is cached, hence need to recreated.
-	files = db.NewFileSet("default", defaultFs, dbi)
+	files = db.NewFileSet("default", defaultFs, m.db)
 
 	if l := len(files.ListDevices()); l != 1 {
 		t.Errorf("Expected one device got %v", l)
@@ -2702,12 +2694,6 @@ func TestInternalScan(t *testing.T) {
 func TestCustomMarkerName(t *testing.T) {
 	testOs := &fatalOs{t}
 
-	ldb := db.NewLowlevel(backend.OpenMemory())
-	set := db.NewFileSet("default", defaultFs, ldb)
-	set.Update(protocol.LocalDeviceID, []protocol.FileInfo{
-		{Name: "dummyfile"},
-	})
-
 	fcfg := testFolderConfigTmp()
 	fcfg.ID = "default"
 	fcfg.RescanIntervalS = 1
@@ -2723,7 +2709,13 @@ func TestCustomMarkerName(t *testing.T) {
 
 	testOs.RemoveAll(fcfg.Path)
 
-	m := newModel(cfg, myID, "syncthing", "dev", ldb, nil)
+	m := newModel(cfg, myID, "syncthing", "dev", nil)
+
+	set := db.NewFileSet("default", defaultFs, m.db)
+	set.Update(protocol.LocalDeviceID, []protocol.FileInfo{
+		{Name: "dummyfile"},
+	})
+
 	sub := m.evLogger.Subscribe(events.StateChanged)
 	defer sub.Unsubscribe()
 	m.ServeBackground()
@@ -3075,10 +3067,9 @@ func TestPausedFolders(t *testing.T) {
 func TestIssue4094(t *testing.T) {
 	testOs := &fatalOs{t}
 
-	db := db.NewLowlevel(backend.OpenMemory())
 	// Create a separate wrapper not to pollute other tests.
 	wrapper := createTmpWrapper(config.Configuration{})
-	m := newModel(wrapper, myID, "syncthing", "dev", db, nil)
+	m := newModel(wrapper, myID, "syncthing", "dev", nil)
 	m.ServeBackground()
 	defer cleanupModel(m)
 
@@ -3111,11 +3102,8 @@ func TestIssue4094(t *testing.T) {
 func TestIssue4903(t *testing.T) {
 	testOs := &fatalOs{t}
 
-	db := db.NewLowlevel(backend.OpenMemory())
-	// Create a separate wrapper not to pollute other tests.
 	wrapper := createTmpWrapper(config.Configuration{})
-	m := newModel(wrapper, myID, "syncthing", "dev", db, nil)
-	m.ServeBackground()
+	m := setupModel(wrapper)
 	defer cleanupModel(m)
 
 	// Force the model to wire itself and add the folders
@@ -4063,9 +4051,9 @@ func TestIssue6961(t *testing.T) {
 	fcfg.Devices = append(fcfg.Devices, config.FolderDeviceConfiguration{DeviceID: device2})
 	wcfg.SetFolder(fcfg)
 	// Always recalc/repair when opening a fileset.
-	// db := db.NewLowlevel(backend.OpenMemory(), db.WithRecheckInterval(time.Millisecond))
-	db := db.NewLowlevel(backend.OpenMemory())
-	m := newModel(wcfg, myID, "syncthing", "dev", db, nil)
+	m := newModel(wcfg, myID, "syncthing", "dev", nil)
+	m.db.Close()
+	m.db = db.NewLowlevel(backend.OpenMemory(), m.evLogger, db.WithRecheckInterval(time.Millisecond))
 	m.ServeBackground()
 	defer cleanupModelAndRemoveDir(m, tfs.URI())
 	m.ScanFolders()

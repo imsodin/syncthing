@@ -18,6 +18,7 @@ import (
 	"github.com/dchest/siphash"
 	"github.com/greatroar/blobloom"
 	"github.com/syncthing/syncthing/lib/db/backend"
+	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/protocol"
 	"github.com/syncthing/syncthing/lib/rand"
@@ -64,9 +65,10 @@ type Lowlevel struct {
 	gcKeyCount         int
 	indirectGCInterval time.Duration
 	recheckInterval    time.Duration
+	evLogger           events.Logger
 }
 
-func NewLowlevel(backend backend.Backend, opts ...Option) *Lowlevel {
+func NewLowlevel(backend backend.Backend, evLogger events.Logger, opts ...Option) *Lowlevel {
 	db := &Lowlevel{
 		Supervisor: suture.New("db.Lowlevel", suture.Spec{
 			// Only log restarts in debug mode.
@@ -81,6 +83,7 @@ func NewLowlevel(backend backend.Backend, opts ...Option) *Lowlevel {
 		gcMut:              sync.NewRWMutex(),
 		indirectGCInterval: indirectGCDefaultInterval,
 		recheckInterval:    recheckDefaultInterval,
+		evLogger:           evLogger,
 	}
 	for _, opt := range opts {
 		opt(db)
@@ -849,7 +852,7 @@ func (db *Lowlevel) getMetaAndCheck(folder string) *metadataTracker {
 }
 
 func (db *Lowlevel) loadMetadataTracker(folder string) *metadataTracker {
-	meta := newMetadataTracker(db.keyer)
+	meta := newMetadataTracker(db.keyer, db.evLogger)
 	if err := meta.fromDB(db, []byte(folder)); err != nil {
 		if err == errMetaInconsistent {
 			l.Infof("Stored folder metadata for %q is inconsistent; recalculating", folder)
@@ -877,7 +880,7 @@ func (db *Lowlevel) loadMetadataTracker(folder string) *metadataTracker {
 func (db *Lowlevel) recalcMeta(folderStr string) (*metadataTracker, error) {
 	folder := []byte(folderStr)
 
-	meta := newMetadataTracker(db.keyer)
+	meta := newMetadataTracker(db.keyer, db.evLogger)
 	if err := db.checkGlobals(folder); err != nil {
 		return nil, err
 	}

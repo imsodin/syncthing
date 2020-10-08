@@ -10,7 +10,6 @@ import (
 	"encoding/binary"
 	"testing"
 
-	"github.com/syncthing/syncthing/lib/db/backend"
 	"github.com/syncthing/syncthing/lib/protocol"
 )
 
@@ -39,7 +38,7 @@ func init() {
 func setup() (*Lowlevel, *BlockFinder) {
 	// Setup
 
-	db := NewLowlevel(backend.OpenMemory())
+	db := newLowlevelMemory()
 	return db, NewBlockFinder(db)
 }
 
