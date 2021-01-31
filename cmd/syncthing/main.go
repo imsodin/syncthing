@@ -754,7 +754,8 @@ func setupSignalHandling(app *syncthing.App) {
 	sigHup := syscall.Signal(1)
 	signal.Notify(restartSign, sigHup)
 	go func() {
-		<-restartSign
+		s := <-restartSign
+		l.Debugf("Signal %d received on inner process; exiting", s)
 		app.Stop(svcutil.ExitRestart)
 	}()
 
@@ -763,7 +764,8 @@ func setupSignalHandling(app *syncthing.App) {
 	stopSign := make(chan os.Signal, 1)
 	signal.Notify(stopSign, os.Interrupt, sigTerm)
 	go func() {
-		<-stopSign
+		s := <-stopSign
+		l.Debugf("Signal %d received on inner process; exiting", s)
 		app.Stop(svcutil.ExitSuccess)
 	}()
 }

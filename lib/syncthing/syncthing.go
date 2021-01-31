@@ -383,6 +383,7 @@ func (a *App) Error() error {
 // Stop stops the app and sets its exit status to given reason, unless the app
 // was already stopped before. In any case it returns the effective exit status.
 func (a *App) Stop(stopReason svcutil.ExitStatus) svcutil.ExitStatus {
+	l.Debugln("Stop called with status %v", stopReason)
 	return a.stopWithErr(stopReason, nil)
 }
 
@@ -394,6 +395,7 @@ func (a *App) stopWithErr(stopReason svcutil.ExitStatus, err error) svcutil.Exit
 			l.Debugln("Services before stop:")
 			printServiceTree(os.Stdout, a.mainService, 0)
 		}
+		l.Debugln("Stopping with status %v: %v", stopReason, err)
 		a.mainServiceCancel()
 	})
 	<-a.stopped
