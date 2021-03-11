@@ -154,6 +154,7 @@ func (c *CLI) Run() error {
 		showCommand,
 		operationCommand,
 		errorsCommand,
+		apiCommand,
 	}
 
 	// It expects to be give os.Args which has argv[0] set to executable name, so fake it.
