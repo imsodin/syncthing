@@ -11,6 +11,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/syndtr/goleveldb/leveldb"
 	"go.etcd.io/bbolt"
 	bolt "go.etcd.io/bbolt"
 )
@@ -41,19 +42,11 @@ type boltBackend struct {
 }
 
 func (b *boltBackend) NewReadTransaction() (ReadTransaction, error) {
-	tx, err := b.db.Begin(false)
-	if err != nil {
-		return nil, err
-	}
-	return newBoltReadTransaction(tx), nil
+	return newBoltReadTransaction(b.db)
 }
 
 func (b *boltBackend) NewWriteTransaction(hooks ...CommitHook) (WriteTransaction, error) {
-	tx, err := b.db.Begin(true)
-	if err != nil {
-		return nil, wrapBoltErr(err)
-	}
-	return newBoltWriteTransaction(tx, hooks), nil
+	return newBoltWriteTransaction(b.db, hooks)
 }
 
 func (b *boltBackend) Get(key []byte) ([]byte, error) {
@@ -129,11 +122,15 @@ type boltReadTransaction struct {
 	bkt *bolt.Bucket
 }
 
-func newBoltReadTransaction(tx *bolt.Tx) *boltReadTransaction {
+func newBoltReadTransaction(db *bolt.DB) (*boltReadTransaction, error) {
+	tx, err := db.Begin(false)
+	if err != nil {
+		return nil, err
+	}
 	return &boltReadTransaction{
 		tx:  tx,
 		bkt: tx.Bucket(onlyBucket),
-	}
+	}, nil
 }
 
 func (ro *boltReadTransaction) Get(key []byte) ([]byte, error) {
@@ -164,35 +161,47 @@ func (ro *boltReadTransaction) Release() {
 }
 
 type boltWriteTransaction struct {
-	boltReadTransaction
+	*boltReadTransaction
+	db    *bolt.DB
+	batch *batch
 	hooks []CommitHook
 }
 
-func newBoltWriteTransaction(tx *bolt.Tx, hooks []CommitHook) *boltWriteTransaction {
-	bkt := tx.Bucket(onlyBucket)
-	return &boltWriteTransaction{
-		boltReadTransaction: boltReadTransaction{
-			tx:  tx,
-			bkt: bkt,
-		},
-		hooks: hooks,
+func newBoltWriteTransaction(db *bolt.DB, hooks []CommitHook) (*boltWriteTransaction, error) {
+	rt, err := newBoltReadTransaction(db)
+	if err != nil {
+		return nil, err
 	}
+	return &boltWriteTransaction{
+		boltReadTransaction: rt,
+		db:                  db,
+		batch:               new(batch),
+		hooks:               hooks,
+	}, nil
 }
 
 func (rw *boltWriteTransaction) Put(key, val []byte) error {
-	return wrapBoltErr(rw.bkt.Put(key, val))
+	rw.batch.Put(key, val)
+	return nil
 }
 
 func (rw *boltWriteTransaction) Delete(key []byte) error {
-	return wrapBoltErr(rw.bkt.Delete(key))
+	rw.batch.Delete(key)
+	return nil
 }
 
 func (rw *boltWriteTransaction) Checkpoint() error {
 	return nil
 }
 
-func (rw *boltWriteTransaction) Commit() error {
-	return wrapBoltErr(rw.tx.Commit())
+func (rw *boltWriteTransaction) Commit() (err error) {
+	err = rw.tx.Rollback()
+	if err != nil {
+		return wrapBoltErr(err)
+	}
+	return wrapBoltErr(rw.db.Batch(func(tx *bolt.Tx) error {
+		return rw.batch.Flush(tx.Bucket(onlyBucket))
+	}))
 }
 
 type boltIterator struct {
@@ -281,4 +290,33 @@ func wrapBoltErr(err error) error {
 		return &errClosed{}
 	}
 	return err
+}
+
+type batch struct {
+	leveldb.Batch
+}
+
+func (b *batch) Flush(writer Writer) error {
+	r := &batchReplayer{writer: writer}
+	b.Replay(r)
+	b.Reset()
+	return r.err
+}
+
+type batchReplayer struct {
+	writer   Writer
+	flushing bool
+	err      error
+}
+
+func (b *batchReplayer) Delete(key []byte) {
+	if b.err == nil {
+		b.err = b.writer.Delete(key)
+	}
+}
+
+func (b *batchReplayer) Put(key, val []byte) {
+	if b.err == nil {
+		b.err = b.writer.Put(key, val)
+	}
 }
