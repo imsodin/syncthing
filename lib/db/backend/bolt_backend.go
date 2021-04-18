@@ -9,6 +9,8 @@ package backend
 import (
 	"bytes"
 	"errors"
+	"io/ioutil"
+	"os"
 	"time"
 
 	"github.com/syndtr/goleveldb/leveldb"
@@ -19,6 +21,31 @@ import (
 var onlyBucket = []byte("syncthing")
 
 func OpenBolt(path string) (Backend, error) {
+	return newBoltBackend(path)
+}
+
+func OpenBoltMemory() (Backend, error) {
+	f, err := ioutil.TempFile("", "syncthing-memorybolt-")
+	if err != nil {
+		return nil, err
+	}
+	f.Close()
+	b, err := newBoltBackend(f.Name())
+	if err != nil {
+		return nil, err
+	}
+	b.memory = true
+	return b, nil
+}
+
+type boltBackend struct {
+	db       *bolt.DB
+	location string
+	memory   bool
+	closeWG  *closeWaitGroup
+}
+
+func newBoltBackend(path string) (*boltBackend, error) {
 	opts := &bolt.Options{
 		Timeout: time.Second,
 	}
@@ -37,12 +64,6 @@ func OpenBolt(path string) (Backend, error) {
 		db:       db,
 		location: path,
 	}, nil
-}
-
-type boltBackend struct {
-	db       *bolt.DB
-	location string
-	closeWG  *closeWaitGroup
 }
 
 func (b *boltBackend) NewReadTransaction() (ReadTransaction, error) {
@@ -114,7 +135,11 @@ func (b *boltBackend) Delete(key []byte) error {
 }
 
 func (b *boltBackend) Close() error {
-	return b.db.Close()
+	err := b.db.Close()
+	if b.memory {
+		os.RemoveAll(b.location)
+	}
+	return err
 }
 
 func (b *boltBackend) Compact() error {
