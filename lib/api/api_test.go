@@ -9,6 +9,7 @@ package api
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,20 +28,35 @@ import (
 	"github.com/d4l3k/messagediff"
 	"github.com/syncthing/syncthing/lib/assets"
 	"github.com/syncthing/syncthing/lib/config"
+	connmocks "github.com/syncthing/syncthing/lib/connections/mocks"
+	discovermocks "github.com/syncthing/syncthing/lib/discover/mocks"
 	"github.com/syncthing/syncthing/lib/events"
+	eventmocks "github.com/syncthing/syncthing/lib/events/mocks"
 	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/locations"
+	"github.com/syncthing/syncthing/lib/logger"
+	loggermocks "github.com/syncthing/syncthing/lib/logger/mocks"
+	modelmocks "github.com/syncthing/syncthing/lib/model/mocks"
 	"github.com/syncthing/syncthing/lib/protocol"
+	"github.com/syncthing/syncthing/lib/svcutil"
 	"github.com/syncthing/syncthing/lib/sync"
 	"github.com/syncthing/syncthing/lib/tlsutil"
 	"github.com/syncthing/syncthing/lib/ur"
-	"github.com/thejerf/suture"
+	"github.com/thejerf/suture/v4"
 )
 
 var (
-	confDir = filepath.Join("testdata", "config")
-	token   = filepath.Join(confDir, "csrftokens.txt")
+	confDir    = filepath.Join("testdata", "config")
+	token      = filepath.Join(confDir, "csrftokens.txt")
+	dev1       protocol.DeviceID
+	apiCfg     = newMockedConfig()
+	testAPIKey = "foobarbaz"
 )
+
+func init() {
+	dev1, _ = protocol.DeviceIDFromString("AIR6LPZ-7K4PTTV-UXQSMUU-CPQ5YWH-OEDFIIQ-JUG777G-2YQXXR5-YD6AWQR")
+	apiCfg.GUIReturns(config.GUIConfiguration{APIKey: testAPIKey})
+}
 
 func TestMain(m *testing.M) {
 	orig := locations.GetBaseDir(locations.ConfigBaseDir)
@@ -106,17 +122,16 @@ func TestStopAfterBrokenConfig(t *testing.T) {
 			RawUseTLS:  false,
 		},
 	}
-	w := config.Wrap("/dev/null", cfg, events.NoopLogger)
+	w := config.Wrap("/dev/null", cfg, protocol.LocalDeviceID, events.NoopLogger)
 
-	srv := New(protocol.LocalDeviceID, w, "", "syncthing", nil, nil, nil, events.NoopLogger, nil, nil, nil, nil, nil, nil, nil, false).(*service)
+	srv := New(protocol.LocalDeviceID, w, "", "syncthing", nil, nil, nil, events.NoopLogger, nil, nil, nil, nil, nil, nil, false).(*service)
 	defer os.Remove(token)
 	srv.started = make(chan string)
 
-	sup := suture.New("test", suture.Spec{
-		PassThroughPanics: true,
-	})
+	sup := suture.New("test", svcutil.SpecWithDebugLogger(l))
 	sup.Add(srv)
-	sup.ServeBackground()
+	ctx, cancel := context.WithCancel(context.Background())
+	sup.ServeBackground(ctx)
 
 	<-srv.started
 
@@ -134,9 +149,7 @@ func TestStopAfterBrokenConfig(t *testing.T) {
 		t.Fatal("Verify config should have failed")
 	}
 
-	// Nonetheless, it should be fine to Stop() it without panic.
-
-	sup.Stop()
+	cancel()
 }
 
 func TestAssetsDir(t *testing.T) {
@@ -242,14 +255,11 @@ type httpTestCase struct {
 func TestAPIServiceRequests(t *testing.T) {
 	t.Parallel()
 
-	const testAPIKey = "foobarbaz"
-	cfg := new(mockedConfig)
-	cfg.gui.APIKey = testAPIKey
-	baseURL, sup, err := startHTTP(cfg)
+	baseURL, cancel, err := startHTTP(apiCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sup.Stop()
+	defer cancel()
 
 	cases := []httpTestCase{
 		// /rest/db
@@ -396,6 +406,62 @@ func TestAPIServiceRequests(t *testing.T) {
 			Type:   "text/plain",
 			Prefix: "",
 		},
+
+		// /rest/config
+		{
+			URL:    "/rest/config",
+			Code:   200,
+			Type:   "application/json",
+			Prefix: "",
+		},
+		{
+			URL:    "/rest/config/folders",
+			Code:   200,
+			Type:   "application/json",
+			Prefix: "",
+		},
+		{
+			URL:    "/rest/config/folders/missing",
+			Code:   404,
+			Type:   "text/plain",
+			Prefix: "",
+		},
+		{
+			URL:    "/rest/config/devices",
+			Code:   200,
+			Type:   "application/json",
+			Prefix: "",
+		},
+		{
+			URL:    "/rest/config/devices/illegalid",
+			Code:   400,
+			Type:   "text/plain",
+			Prefix: "",
+		},
+		{
+			URL:    "/rest/config/devices/" + protocol.GlobalDeviceID.String(),
+			Code:   404,
+			Type:   "text/plain",
+			Prefix: "",
+		},
+		{
+			URL:    "/rest/config/options",
+			Code:   200,
+			Type:   "application/json",
+			Prefix: "{",
+		},
+		{
+			URL:    "/rest/config/gui",
+			Code:   200,
+			Type:   "application/json",
+			Prefix: "{",
+		},
+		{
+			URL:    "/rest/config/ldap",
+			Code:   200,
+			Type:   "application/json",
+			Prefix: "{",
+		},
 	}
 
 	for _, tc := range cases {
@@ -455,14 +521,16 @@ func testHTTPRequest(t *testing.T, baseURL string, tc httpTestCase, apikey strin
 func TestHTTPLogin(t *testing.T) {
 	t.Parallel()
 
-	cfg := new(mockedConfig)
-	cfg.gui.User = "üser"
-	cfg.gui.Password = "$2a$10$IdIZTxTg/dCNuNEGlmLynOjqg4B1FvDKuIV5e0BB3pnWVHNb8.GSq" // bcrypt of "räksmörgås" in UTF-8
-	baseURL, sup, err := startHTTP(cfg)
+	cfg := newMockedConfig()
+	cfg.GUIReturns(config.GUIConfiguration{
+		User:     "üser",
+		Password: "$2a$10$IdIZTxTg/dCNuNEGlmLynOjqg4B1FvDKuIV5e0BB3pnWVHNb8.GSq", // bcrypt of "räksmörgås" in UTF-8
+	})
+	baseURL, cancel, err := startHTTP(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sup.Stop()
+	defer cancel()
 
 	// Verify rejection when not using authorization
 
@@ -520,20 +588,30 @@ func TestHTTPLogin(t *testing.T) {
 	}
 }
 
-func startHTTP(cfg *mockedConfig) (string, *suture.Supervisor, error) {
-	m := new(mockedModel)
+func startHTTP(cfg config.Wrapper) (string, context.CancelFunc, error) {
+	m := new(modelmocks.Model)
 	assetDir := "../../gui"
-	eventSub := new(mockedEventSub)
-	diskEventSub := new(mockedEventSub)
-	discoverer := new(mockedCachingMux)
-	connections := new(mockedConnections)
-	errorLog := new(mockedLoggerRecorder)
-	systemLog := new(mockedLoggerRecorder)
+	eventSub := new(eventmocks.BufferedSubscription)
+	diskEventSub := new(eventmocks.BufferedSubscription)
+	discoverer := new(discovermocks.Manager)
+	connections := new(connmocks.Service)
+	errorLog := new(loggermocks.Recorder)
+	systemLog := new(loggermocks.Recorder)
+	for _, l := range []*loggermocks.Recorder{errorLog, systemLog} {
+		l.SinceReturns([]logger.Line{
+			{
+				When:    time.Now(),
+				Message: "Test message",
+			},
+		})
+	}
 	addrChan := make(chan string)
+	mockedSummary := &modelmocks.FolderSummaryService{}
+	mockedSummary.SummaryReturns(map[string]interface{}{"mocked": true}, nil)
 
 	// Instantiate the API service
 	urService := ur.New(cfg, m, connections, false)
-	svc := New(protocol.LocalDeviceID, cfg, assetDir, "syncthing", m, eventSub, diskEventSub, events.NoopLogger, discoverer, connections, urService, &mockedFolderSummaryService{}, errorLog, systemLog, nil, false).(*service)
+	svc := New(protocol.LocalDeviceID, cfg, assetDir, "syncthing", m, eventSub, diskEventSub, events.NoopLogger, discoverer, connections, urService, mockedSummary, errorLog, systemLog, false).(*service)
 	defer os.Remove(token)
 	svc.started = addrChan
 
@@ -542,36 +620,34 @@ func startHTTP(cfg *mockedConfig) (string, *suture.Supervisor, error) {
 		PassThroughPanics: true,
 	})
 	supervisor.Add(svc)
-	supervisor.ServeBackground()
+	ctx, cancel := context.WithCancel(context.Background())
+	supervisor.ServeBackground(ctx)
 
 	// Make sure the API service is listening, and get the URL to use.
 	addr := <-addrChan
 	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
 	if err != nil {
-		supervisor.Stop()
-		return "", nil, fmt.Errorf("weird address from API service: %w", err)
+		cancel()
+		return "", cancel, fmt.Errorf("weird address from API service: %w", err)
 	}
 
-	host, _, _ := net.SplitHostPort(cfg.gui.RawAddress)
+	host, _, _ := net.SplitHostPort(cfg.GUI().RawAddress)
 	if host == "" || host == "0.0.0.0" {
 		host = "127.0.0.1"
 	}
 	baseURL := fmt.Sprintf("http://%s", net.JoinHostPort(host, strconv.Itoa(tcpAddr.Port)))
 
-	return baseURL, supervisor, nil
+	return baseURL, cancel, nil
 }
 
 func TestCSRFRequired(t *testing.T) {
 	t.Parallel()
 
-	const testAPIKey = "foobarbaz"
-	cfg := new(mockedConfig)
-	cfg.gui.APIKey = testAPIKey
-	baseURL, sup, err := startHTTP(cfg)
+	baseURL, cancel, err := startHTTP(apiCfg)
 	if err != nil {
 		t.Fatal("Unexpected error from getting base URL:", err)
 	}
-	defer sup.Stop()
+	defer cancel()
 
 	cli := &http.Client{
 		Timeout: time.Minute,
@@ -640,14 +716,11 @@ func TestCSRFRequired(t *testing.T) {
 func TestRandomString(t *testing.T) {
 	t.Parallel()
 
-	const testAPIKey = "foobarbaz"
-	cfg := new(mockedConfig)
-	cfg.gui.APIKey = testAPIKey
-	baseURL, sup, err := startHTTP(cfg)
+	baseURL, cancel, err := startHTTP(apiCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sup.Stop()
+	defer cancel()
 	cli := &http.Client{
 		Timeout: time.Second,
 	}
@@ -733,14 +806,11 @@ func TestConfigPostDupFolder(t *testing.T) {
 }
 
 func testConfigPost(data io.Reader) (*http.Response, error) {
-	const testAPIKey = "foobarbaz"
-	cfg := new(mockedConfig)
-	cfg.gui.APIKey = testAPIKey
-	baseURL, sup, err := startHTTP(cfg)
+	baseURL, cancel, err := startHTTP(apiCfg)
 	if err != nil {
 		return nil, err
 	}
-	defer sup.Stop()
+	defer cancel()
 	cli := &http.Client{
 		Timeout: time.Second,
 	}
@@ -755,13 +825,13 @@ func TestHostCheck(t *testing.T) {
 
 	// An API service bound to localhost should reject non-localhost host Headers
 
-	cfg := new(mockedConfig)
-	cfg.gui.RawAddress = "127.0.0.1:0"
-	baseURL, sup, err := startHTTP(cfg)
+	cfg := newMockedConfig()
+	cfg.GUIReturns(config.GUIConfiguration{RawAddress: "127.0.0.1:0"})
+	baseURL, cancel, err := startHTTP(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sup.Stop()
+	defer cancel()
 
 	// A normal HTTP get to the localhost-bound service should succeed
 
@@ -815,14 +885,16 @@ func TestHostCheck(t *testing.T) {
 
 	// A server with InsecureSkipHostCheck set behaves differently
 
-	cfg = new(mockedConfig)
-	cfg.gui.RawAddress = "127.0.0.1:0"
-	cfg.gui.InsecureSkipHostCheck = true
-	baseURL, sup, err = startHTTP(cfg)
+	cfg = newMockedConfig()
+	cfg.GUIReturns(config.GUIConfiguration{
+		RawAddress:            "127.0.0.1:0",
+		InsecureSkipHostCheck: true,
+	})
+	baseURL, cancel, err = startHTTP(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sup.Stop()
+	defer cancel()
 
 	// A request with a suspicious Host header should be allowed
 
@@ -839,14 +911,16 @@ func TestHostCheck(t *testing.T) {
 
 	// A server bound to a wildcard address also doesn't do the check
 
-	cfg = new(mockedConfig)
-	cfg.gui.RawAddress = "0.0.0.0:0"
-	cfg.gui.InsecureSkipHostCheck = true
-	baseURL, sup, err = startHTTP(cfg)
+	cfg = newMockedConfig()
+	cfg.GUIReturns(config.GUIConfiguration{
+		RawAddress:            "0.0.0.0:0",
+		InsecureSkipHostCheck: true,
+	})
+	baseURL, cancel, err = startHTTP(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sup.Stop()
+	defer cancel()
 
 	// A request with a suspicious Host header should be allowed
 
@@ -868,13 +942,15 @@ func TestHostCheck(t *testing.T) {
 		return
 	}
 
-	cfg = new(mockedConfig)
-	cfg.gui.RawAddress = "[::1]:0"
-	baseURL, sup, err = startHTTP(cfg)
+	cfg = newMockedConfig()
+	cfg.GUIReturns(config.GUIConfiguration{
+		RawAddress: "[::1]:0",
+	})
+	baseURL, cancel, err = startHTTP(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sup.Stop()
+	defer cancel()
 
 	// A normal HTTP get to the localhost-bound service should succeed
 
@@ -934,14 +1010,14 @@ func TestAddressIsLocalhost(t *testing.T) {
 		{"[::1]:8080", true},
 		{"127.0.0.1:8080", true},
 		{"127.23.45.56:8080", true},
+		{"www.localhost", true},
+		{"www.localhost:8080", true},
 
 		// These are all non-localhost addresses
 		{"example.com", false},
 		{"example.com:8080", false},
 		{"localhost.com", false},
 		{"localhost.com:8080", false},
-		{"www.localhost", false},
-		{"www.localhost:8080", false},
 		{"192.0.2.10", false},
 		{"192.0.2.10:8080", false},
 		{"0.0.0.0", false},
@@ -962,14 +1038,11 @@ func TestAddressIsLocalhost(t *testing.T) {
 func TestAccessControlAllowOriginHeader(t *testing.T) {
 	t.Parallel()
 
-	const testAPIKey = "foobarbaz"
-	cfg := new(mockedConfig)
-	cfg.gui.APIKey = testAPIKey
-	baseURL, sup, err := startHTTP(cfg)
+	baseURL, cancel, err := startHTTP(apiCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sup.Stop()
+	defer cancel()
 	cli := &http.Client{
 		Timeout: time.Second,
 	}
@@ -993,14 +1066,11 @@ func TestAccessControlAllowOriginHeader(t *testing.T) {
 func TestOptionsRequest(t *testing.T) {
 	t.Parallel()
 
-	const testAPIKey = "foobarbaz"
-	cfg := new(mockedConfig)
-	cfg.gui.APIKey = testAPIKey
-	baseURL, sup, err := startHTTP(cfg)
+	baseURL, cancel, err := startHTTP(apiCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sup.Stop()
+	defer cancel()
 	cli := &http.Client{
 		Timeout: time.Second,
 	}
@@ -1018,8 +1088,8 @@ func TestOptionsRequest(t *testing.T) {
 	if resp.Header.Get("Access-Control-Allow-Origin") != "*" {
 		t.Fatal("OPTIONS on /rest/system/status should return a 'Access-Control-Allow-Origin: *' header")
 	}
-	if resp.Header.Get("Access-Control-Allow-Methods") != "GET, POST" {
-		t.Fatal("OPTIONS on /rest/system/status should return a 'Access-Control-Allow-Methods: GET, POST' header")
+	if resp.Header.Get("Access-Control-Allow-Methods") != "GET, POST, PUT, PATCH, DELETE, OPTIONS" {
+		t.Fatal("OPTIONS on /rest/system/status should return a 'Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS' header")
 	}
 	if resp.Header.Get("Access-Control-Allow-Headers") != "Content-Type, X-API-Key" {
 		t.Fatal("OPTIONS on /rest/system/status should return a 'Access-Control-Allow-Headers: Content-Type, X-API-KEY' header")
@@ -1029,10 +1099,10 @@ func TestOptionsRequest(t *testing.T) {
 func TestEventMasks(t *testing.T) {
 	t.Parallel()
 
-	cfg := new(mockedConfig)
-	defSub := new(mockedEventSub)
-	diskSub := new(mockedEventSub)
-	svc := New(protocol.LocalDeviceID, cfg, "", "syncthing", nil, defSub, diskSub, events.NoopLogger, nil, nil, nil, nil, nil, nil, nil, false).(*service)
+	cfg := newMockedConfig()
+	defSub := new(eventmocks.BufferedSubscription)
+	diskSub := new(eventmocks.BufferedSubscription)
+	svc := New(protocol.LocalDeviceID, cfg, "", "syncthing", nil, defSub, diskSub, events.NoopLogger, nil, nil, nil, nil, nil, nil, false).(*service)
 	defer os.Remove(token)
 
 	if mask := svc.getEventMask(""); mask != DefaultEventMask {
@@ -1170,6 +1240,151 @@ func TestShouldRegenerateCertificate(t *testing.T) {
 		}
 		if err := shouldRegenerateCertificate(crt); err == nil {
 			t.Error("expected expiry error")
+		}
+	}
+}
+
+func TestConfigChanges(t *testing.T) {
+	t.Parallel()
+
+	const testAPIKey = "foobarbaz"
+	cfg := config.Configuration{
+		GUI: config.GUIConfiguration{
+			RawAddress: "127.0.0.1:0",
+			RawUseTLS:  false,
+			APIKey:     testAPIKey,
+		},
+	}
+	tmpFile, err := ioutil.TempFile("", "syncthing-testConfig-")
+	if err != nil {
+		panic(err)
+	}
+	defer os.Remove(tmpFile.Name())
+	w := config.Wrap(tmpFile.Name(), cfg, protocol.LocalDeviceID, events.NoopLogger)
+	tmpFile.Close()
+	cfgCtx, cfgCancel := context.WithCancel(context.Background())
+	go w.Serve(cfgCtx)
+	defer cfgCancel()
+	baseURL, cancel, err := startHTTP(w)
+	if err != nil {
+		t.Fatal("Unexpected error from getting base URL:", err)
+	}
+	defer cancel()
+
+	cli := &http.Client{
+		Timeout: time.Minute,
+	}
+
+	do := func(req *http.Request, status int) *http.Response {
+		t.Helper()
+		req.Header.Set("X-API-Key", testAPIKey)
+		resp, err := cli.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != status {
+			t.Errorf("Expected status %v, got %v", status, resp.StatusCode)
+		}
+		return resp
+	}
+
+	mod := func(method, path string, data interface{}) {
+		t.Helper()
+		bs, err := json.Marshal(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req, _ := http.NewRequest(method, baseURL+path, bytes.NewReader(bs))
+		do(req, http.StatusOK).Body.Close()
+	}
+
+	get := func(path string) *http.Response {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodGet, baseURL+path, nil)
+		return do(req, http.StatusOK)
+	}
+
+	dev1Path := "/rest/config/devices/" + dev1.String()
+
+	// Create device
+	mod(http.MethodPut, "/rest/config/devices", []config.DeviceConfiguration{{DeviceID: dev1}})
+
+	// Check its there
+	get(dev1Path).Body.Close()
+
+	// Modify just a single attribute
+	mod(http.MethodPatch, dev1Path, map[string]bool{"Paused": true})
+
+	// Check that attribute
+	resp := get(dev1Path)
+	var dev config.DeviceConfiguration
+	if err := unmarshalTo(resp.Body, &dev); err != nil {
+		t.Fatal(err)
+	}
+	if !dev.Paused {
+		t.Error("Expected device to be paused")
+	}
+
+	folder2Path := "/rest/config/folders/folder2"
+
+	// Create a folder and add another
+	mod(http.MethodPut, "/rest/config/folders", []config.FolderConfiguration{{ID: "folder1", Path: "folder1"}})
+	mod(http.MethodPut, folder2Path, config.FolderConfiguration{ID: "folder2", Path: "folder2"})
+
+	// Check they are there
+	get("/rest/config/folders/folder1").Body.Close()
+	get(folder2Path).Body.Close()
+
+	// Modify just a single attribute
+	mod(http.MethodPatch, folder2Path, map[string]bool{"Paused": true})
+
+	// Check that attribute
+	resp = get(folder2Path)
+	var folder config.FolderConfiguration
+	if err := unmarshalTo(resp.Body, &folder); err != nil {
+		t.Fatal(err)
+	}
+	if !dev.Paused {
+		t.Error("Expected folder to be paused")
+	}
+
+	// Delete folder2
+	req, _ := http.NewRequest(http.MethodDelete, baseURL+folder2Path, nil)
+	do(req, http.StatusOK)
+
+	// Check folder1 is still there and folder2 gone
+	get("/rest/config/folders/folder1").Body.Close()
+	req, _ = http.NewRequest(http.MethodGet, baseURL+folder2Path, nil)
+	do(req, http.StatusNotFound)
+
+	mod(http.MethodPatch, "/rest/config/options", map[string]int{"maxSendKbps": 50})
+	resp = get("/rest/config/options")
+	var opts config.OptionsConfiguration
+	if err := unmarshalTo(resp.Body, &opts); err != nil {
+		t.Fatal(err)
+	}
+	if opts.MaxSendKbps != 50 {
+		t.Error("Exepcted 50 for MaxSendKbps, got", opts.MaxSendKbps)
+	}
+}
+
+func TestSanitizedHostname(t *testing.T) {
+	cases := []struct {
+		in, out string
+	}{
+		{"foo.BAR-baz", "foo.bar-baz"},
+		{"~.~-Min 1:a Räksmörgås-dator 😀😎 ~.~-", "min1araksmorgas-dator"},
+		{"Vicenç-PC", "vicenc-pc"},
+		{"~.~-~.~-", ""},
+		{"", ""},
+	}
+
+	for _, tc := range cases {
+		res, err := sanitizedHostname(tc.in)
+		if tc.out == "" && err == nil {
+			t.Errorf("%q should cause error", tc.in)
+		} else if res != tc.out {
+			t.Errorf("%q => %q, expected %q", tc.in, res, tc.out)
 		}
 	}
 }

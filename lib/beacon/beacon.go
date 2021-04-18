@@ -12,9 +12,9 @@ import (
 	"net"
 	"time"
 
-	"github.com/thejerf/suture"
+	"github.com/thejerf/suture/v4"
 
-	"github.com/syncthing/syncthing/lib/util"
+	"github.com/syncthing/syncthing/lib/svcutil"
 )
 
 type recv struct {
@@ -33,8 +33,8 @@ type Interface interface {
 type cast struct {
 	*suture.Supervisor
 	name    string
-	reader  util.ServiceWithError
-	writer  util.ServiceWithError
+	reader  svcutil.ServiceWithError
+	writer  svcutil.ServiceWithError
 	outbox  chan recv
 	inbox   chan []byte
 	stopped chan struct{}
@@ -44,24 +44,22 @@ type cast struct {
 // caller needs to set reader and writer with the addReader and addWriter
 // methods to get a functional implementation of Interface.
 func newCast(name string) *cast {
-	return &cast{
-		Supervisor: suture.New(name, suture.Spec{
-			// Don't retry too frenetically: an error to open a socket or
-			// whatever is usually something that is either permanent or takes
-			// a while to get solved...
-			FailureThreshold: 2,
-			FailureBackoff:   60 * time.Second,
-			// Only log restarts in debug mode.
-			Log: func(line string) {
-				l.Debugln(line)
-			},
-			PassThroughPanics: true,
-		}),
-		name:    name,
-		inbox:   make(chan []byte),
-		outbox:  make(chan recv, 16),
-		stopped: make(chan struct{}),
+	// Only log restarts in debug mode.
+	spec := svcutil.SpecWithDebugLogger(l)
+	// Don't retry too frenetically: an error to open a socket or
+	// whatever is usually something that is either permanent or takes
+	// a while to get solved...
+	spec.FailureThreshold = 2
+	spec.FailureBackoff = 60 * time.Second
+	c := &cast{
+		Supervisor: suture.New(name, spec),
+		name:       name,
+		inbox:      make(chan []byte),
+		outbox:     make(chan recv, 16),
+		stopped:    make(chan struct{}),
 	}
+	svcutil.OnSupervisorDone(c.Supervisor, func() { close(c.stopped) })
+	return c
 }
 
 func (c *cast) addReader(svc func(context.Context) error) {
@@ -74,18 +72,8 @@ func (c *cast) addWriter(svc func(ctx context.Context) error) {
 	c.Add(c.writer)
 }
 
-func (c *cast) createService(svc func(context.Context) error, suffix string) util.ServiceWithError {
-	return util.AsServiceWithError(func(ctx context.Context) error {
-		l.Debugln("Starting", c.name, suffix)
-		err := svc(ctx)
-		l.Debugf("Stopped %v %v: %v", c.name, suffix, err)
-		return err
-	}, fmt.Sprintf("%s/%s", c, suffix))
-}
-
-func (c *cast) Stop() {
-	c.Supervisor.Stop()
-	close(c.stopped)
+func (c *cast) createService(svc func(context.Context) error, suffix string) svcutil.ServiceWithError {
+	return svcutil.AsService(svc, fmt.Sprintf("%s/%s", c, suffix))
 }
 
 func (c *cast) String() string {

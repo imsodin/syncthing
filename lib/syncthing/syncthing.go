@@ -9,6 +9,7 @@ package syncthing
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,7 +20,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/thejerf/suture"
+	"github.com/thejerf/suture/v4"
 
 	"github.com/syncthing/syncthing/lib/api"
 	"github.com/syncthing/syncthing/lib/build"
@@ -36,6 +37,7 @@ import (
 	"github.com/syncthing/syncthing/lib/protocol"
 	"github.com/syncthing/syncthing/lib/rand"
 	"github.com/syncthing/syncthing/lib/sha256"
+	"github.com/syncthing/syncthing/lib/svcutil"
 	"github.com/syncthing/syncthing/lib/tlsutil"
 	"github.com/syncthing/syncthing/lib/upgrade"
 	"github.com/syncthing/syncthing/lib/ur"
@@ -50,26 +52,12 @@ const (
 	deviceCertLifetimeDays = 20 * 365
 )
 
-type ExitStatus int
-
-func (s ExitStatus) AsInt() int {
-	return int(s)
-}
-
-const (
-	ExitSuccess            ExitStatus = 0
-	ExitError              ExitStatus = 1
-	ExitNoUpgradeAvailable ExitStatus = 2
-	ExitRestart            ExitStatus = 3
-	ExitUpgrade            ExitStatus = 4
-)
-
 type Options struct {
 	AssetDir         string
 	AuditWriter      io.Writer
 	DeadlockTimeoutS int
 	NoUpgrade        bool
-	ProfilerURL      string
+	ProfilerAddr     string
 	ResetDeltaIdxs   bool
 	Verbose          bool
 	// null duration means use default value
@@ -78,32 +66,35 @@ type Options struct {
 }
 
 type App struct {
-	myID        protocol.DeviceID
-	mainService *suture.Supervisor
-	cfg         config.Wrapper
-	ll          *db.Lowlevel
-	evLogger    events.Logger
-	cert        tls.Certificate
-	opts        Options
-	exitStatus  ExitStatus
-	err         error
-	stopOnce    sync.Once
-	stop        chan struct{}
-	stopped     chan struct{}
+	myID              protocol.DeviceID
+	mainService       *suture.Supervisor
+	cfg               config.Wrapper
+	ll                *db.Lowlevel
+	evLogger          events.Logger
+	cert              tls.Certificate
+	opts              Options
+	exitStatus        svcutil.ExitStatus
+	err               error
+	stopOnce          sync.Once
+	mainServiceCancel context.CancelFunc
+	stopped           chan struct{}
 }
 
-func New(cfg config.Wrapper, dbBackend backend.Backend, evLogger events.Logger, cert tls.Certificate, opts Options) *App {
+func New(cfg config.Wrapper, dbBackend backend.Backend, evLogger events.Logger, cert tls.Certificate, opts Options) (*App, error) {
+	ll, err := db.NewLowlevel(dbBackend, evLogger, db.WithRecheckInterval(opts.DBRecheckInterval), db.WithIndirectGCInterval(opts.DBIndirectGCInterval))
+	if err != nil {
+		return nil, err
+	}
 	a := &App{
 		cfg:      cfg,
-		ll:       db.NewLowlevel(dbBackend, db.WithRecheckInterval(opts.DBRecheckInterval), db.WithIndirectGCInterval(opts.DBIndirectGCInterval)),
+		ll:       ll,
 		evLogger: evLogger,
 		opts:     opts,
 		cert:     cert,
-		stop:     make(chan struct{}),
 		stopped:  make(chan struct{}),
 	}
 	close(a.stopped) // Hasn't been started, so shouldn't block on Wait.
-	return a
+	return a, nil
 }
 
 // Start executes the app and returns once all the startup operations are done,
@@ -112,20 +103,17 @@ func New(cfg config.Wrapper, dbBackend backend.Backend, evLogger events.Logger, 
 func (a *App) Start() error {
 	// Create a main service manager. We'll add things to this as we go along.
 	// We want any logging it does to go through our log system.
-	a.mainService = suture.New("main", suture.Spec{
-		Log: func(line string) {
-			l.Debugln(line)
-		},
-		PassThroughPanics: true,
-	})
+	spec := svcutil.SpecWithDebugLogger(l)
+	a.mainService = suture.New("main", spec)
 
 	// Start the supervisor and wait for it to stop to handle cleanup.
 	a.stopped = make(chan struct{})
-	a.mainService.ServeBackground()
-	go a.run()
+	ctx, cancel := context.WithCancel(context.Background())
+	a.mainServiceCancel = cancel
+	go a.run(ctx)
 
 	if err := a.startup(); err != nil {
-		a.stopWithErr(ExitError, err)
+		a.stopWithErr(svcutil.ExitError, err)
 		return err
 	}
 
@@ -133,6 +121,8 @@ func (a *App) Start() error {
 }
 
 func (a *App) startup() error {
+	a.mainService.Add(ur.NewFailureHandler(a.cfg, a.evLogger))
+
 	a.mainService.Add(a.ll)
 
 	if a.opts.AuditWriter != nil {
@@ -179,11 +169,11 @@ func (a *App) startup() error {
 		return err
 	}
 
-	if len(a.opts.ProfilerURL) > 0 {
+	if len(a.opts.ProfilerAddr) > 0 {
 		go func() {
-			l.Debugln("Starting profiler on", a.opts.ProfilerURL)
+			l.Debugln("Starting profiler on", a.opts.ProfilerAddr)
 			runtime.SetBlockProfileRate(1)
-			err := http.ListenAndServe(a.opts.ProfilerURL, nil)
+			err := http.ListenAndServe(a.opts.ProfilerAddr, nil)
 			if err != nil {
 				l.Warnln(err)
 				return
@@ -240,17 +230,11 @@ func (a *App) startup() error {
 			l.Infoln("Detected upgrade from", prevVersion, "to", build.Version)
 		}
 
-		// Drop delta indexes in case we've changed random stuff we
-		// shouldn't have. We will resend our index on next connect.
-		db.DropDeltaIndexIDs(a.ll)
-	}
-
-	// Check and repair metadata and sequences on every upgrade including RCs.
-	prevParts = strings.Split(prevVersion, "+")
-	curParts = strings.Split(build.Version, "+")
-	if rel := upgrade.CompareVersions(prevParts[0], curParts[0]); rel != upgrade.Equal {
-		l.Infoln("Checking db due to upgrade - this may take a while...")
-		a.ll.CheckRepair()
+		if a.cfg.Options().SendFullIndexOnUpgrade {
+			// Drop delta indexes in case we've changed random stuff we
+			// shouldn't have. We will resend our index on next connect.
+			db.DropDeltaIndexIDs(a.ll)
+		}
 	}
 
 	if build.Version != prevVersion {
@@ -293,24 +277,21 @@ func (a *App) startup() error {
 	a.mainService.Add(discoveryManager)
 	a.mainService.Add(connectionsService)
 
-	// Candidate builds always run with usage reporting.
-
-	if opts := a.cfg.Options(); build.IsCandidate {
-		l.Infoln("Anonymous usage reporting is always enabled for candidate releases.")
-		if opts.URAccepted != ur.Version {
-			opts.URAccepted = ur.Version
-			a.cfg.SetOptions(opts)
-			a.cfg.Save()
-			// Unique ID will be set and config saved below if necessary.
+	a.cfg.Modify(func(cfg *config.Configuration) {
+		// Candidate builds always run with usage reporting.
+		if build.IsCandidate {
+			l.Infoln("Anonymous usage reporting is always enabled for candidate releases.")
+			if cfg.Options.URAccepted != ur.Version {
+				cfg.Options.URAccepted = ur.Version
+				// Unique ID will be set and config saved below if necessary.
+			}
 		}
-	}
 
-	// If we are going to do usage reporting, ensure we have a valid unique ID.
-	if opts := a.cfg.Options(); opts.URAccepted > 0 && opts.URUniqueID == "" {
-		opts.URUniqueID = rand.String(8)
-		a.cfg.SetOptions(opts)
-		a.cfg.Save()
-	}
+		// If we are going to do usage reporting, ensure we have a valid unique ID.
+		if cfg.Options.URAccepted > 0 && cfg.Options.URUniqueID == "" {
+			cfg.Options.URUniqueID = rand.String(8)
+		}
+	})
 
 	usageReportingSvc := ur.New(a.cfg, m, connectionsService, a.opts.NoUpgrade)
 	a.mainService.Add(usageReportingSvc)
@@ -347,14 +328,9 @@ func (a *App) startup() error {
 	return nil
 }
 
-func (a *App) run() {
-	<-a.stop
-
-	if shouldDebug() {
-		l.Debugln("Services before stop:")
-		printServiceTree(os.Stdout, a.mainService, 0)
-	}
-	a.mainService.Stop()
+func (a *App) run(ctx context.Context) {
+	err := a.mainService.Serve(ctx)
+	a.handleMainServiceError(err)
 
 	done := make(chan struct{})
 	go func() {
@@ -372,9 +348,23 @@ func (a *App) run() {
 	close(a.stopped)
 }
 
+func (a *App) handleMainServiceError(err error) {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return
+	}
+	var fatalErr *svcutil.FatalErr
+	if errors.As(err, &fatalErr) {
+		a.exitStatus = fatalErr.Status
+		a.err = fatalErr.Err
+		return
+	}
+	a.err = err
+	a.exitStatus = svcutil.ExitError
+}
+
 // Wait blocks until the app stops running. Also returns if the app hasn't been
 // started yet.
-func (a *App) Wait() ExitStatus {
+func (a *App) Wait() svcutil.ExitStatus {
 	<-a.stopped
 	return a.exitStatus
 }
@@ -383,7 +373,7 @@ func (a *App) Wait() ExitStatus {
 // for the app to stop before returning.
 func (a *App) Error() error {
 	select {
-	case <-a.stop:
+	case <-a.stopped:
 		return a.err
 	default:
 	}
@@ -392,15 +382,19 @@ func (a *App) Error() error {
 
 // Stop stops the app and sets its exit status to given reason, unless the app
 // was already stopped before. In any case it returns the effective exit status.
-func (a *App) Stop(stopReason ExitStatus) ExitStatus {
+func (a *App) Stop(stopReason svcutil.ExitStatus) svcutil.ExitStatus {
 	return a.stopWithErr(stopReason, nil)
 }
 
-func (a *App) stopWithErr(stopReason ExitStatus, err error) ExitStatus {
+func (a *App) stopWithErr(stopReason svcutil.ExitStatus, err error) svcutil.ExitStatus {
 	a.stopOnce.Do(func() {
 		a.exitStatus = stopReason
 		a.err = err
-		close(a.stop)
+		if shouldDebug() {
+			l.Debugln("Services before stop:")
+			printServiceTree(os.Stdout, a.mainService, 0)
+		}
+		a.mainServiceCancel()
 	})
 	<-a.stopped
 	return a.exitStatus
@@ -420,7 +414,7 @@ func (a *App) setupGUI(m model.Model, defaultSub, diskSub events.BufferedSubscri
 	summaryService := model.NewFolderSummaryService(a.cfg, m, a.myID, a.evLogger)
 	a.mainService.Add(summaryService)
 
-	apiSvc := api.New(a.myID, a.cfg, a.opts.AssetDir, tlsDefaultCommonName, m, defaultSub, diskSub, a.evLogger, discoverer, connectionsService, urService, summaryService, errors, systemLog, &controller{a}, a.opts.NoUpgrade)
+	apiSvc := api.New(a.myID, a.cfg, a.opts.AssetDir, tlsDefaultCommonName, m, defaultSub, diskSub, a.evLogger, discoverer, connectionsService, urService, summaryService, errors, systemLog, a.opts.NoUpgrade)
 	a.mainService.Add(apiSvc)
 
 	if err := apiSvc.WaitForStart(); err != nil {
@@ -442,21 +436,6 @@ func checkShortIDs(cfg config.Wrapper) error {
 		exists[shortID] = deviceID
 	}
 	return nil
-}
-
-// Implements api.Controller
-type controller struct{ *App }
-
-func (e *controller) Restart() {
-	e.Stop(ExitRestart)
-}
-
-func (e *controller) Shutdown() {
-	e.Stop(ExitSuccess)
-}
-
-func (e *controller) ExitUpgrading() {
-	e.Stop(ExitUpgrade)
 }
 
 type supervisor interface{ Services() []suture.Service }

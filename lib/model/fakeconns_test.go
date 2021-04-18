@@ -9,12 +9,11 @@ package model
 import (
 	"bytes"
 	"context"
-	"net"
 	"sync"
 	"time"
 
-	"github.com/syncthing/syncthing/lib/connections"
 	"github.com/syncthing/syncthing/lib/protocol"
+	protocolmocks "github.com/syncthing/syncthing/lib/protocol/mocks"
 	"github.com/syncthing/syncthing/lib/scanner"
 )
 
@@ -23,90 +22,37 @@ type downloadProgressMessage struct {
 	updates []protocol.FileDownloadProgressUpdate
 }
 
+func newFakeConnection(id protocol.DeviceID, model Model) *fakeConnection {
+	f := &fakeConnection{
+		Connection: new(protocolmocks.Connection),
+		id:         id,
+		model:      model,
+	}
+	f.RequestCalls(func(ctx context.Context, folder, name string, blockNo int, offset int64, size int, hash []byte, weakHash uint32, fromTemporary bool) ([]byte, error) {
+		return f.fileData[name], nil
+	})
+	f.IDReturns(id)
+	f.CloseCalls(func(err error) {
+		model.Closed(id, err)
+		f.ClosedReturns(true)
+	})
+	return f
+}
+
 type fakeConnection struct {
-	fakeUnderlyingConn
+	*protocolmocks.Connection
 	id                       protocol.DeviceID
 	downloadProgressMessages []downloadProgressMessage
-	closed                   bool
 	files                    []protocol.FileInfo
 	fileData                 map[string][]byte
 	folder                   string
-	model                    *model
-	indexFn                  func(context.Context, string, []protocol.FileInfo)
-	requestFn                func(ctx context.Context, folder, name string, offset int64, size int, hash []byte, fromTemporary bool) ([]byte, error)
-	closeFn                  func(error)
+	model                    Model
 	mut                      sync.Mutex
 }
 
-func (f *fakeConnection) Close(err error) {
-	f.mut.Lock()
-	defer f.mut.Unlock()
-	if f.closeFn != nil {
-		f.closeFn(err)
-		return
-	}
-	f.closed = true
-	f.model.Closed(f, err)
-}
-
-func (f *fakeConnection) Start() {
-}
-
-func (f *fakeConnection) ID() protocol.DeviceID {
-	return f.id
-}
-
-func (f *fakeConnection) Name() string {
-	return ""
-}
-
-func (f *fakeConnection) Option(string) string {
-	return ""
-}
-
-func (f *fakeConnection) Index(ctx context.Context, folder string, fs []protocol.FileInfo) error {
-	f.mut.Lock()
-	defer f.mut.Unlock()
-	if f.indexFn != nil {
-		f.indexFn(ctx, folder, fs)
-	}
-	return nil
-}
-
-func (f *fakeConnection) IndexUpdate(ctx context.Context, folder string, fs []protocol.FileInfo) error {
-	f.mut.Lock()
-	defer f.mut.Unlock()
-	if f.indexFn != nil {
-		f.indexFn(ctx, folder, fs)
-	}
-	return nil
-}
-
-func (f *fakeConnection) Request(ctx context.Context, folder, name string, offset int64, size int, hash []byte, weakHash uint32, fromTemporary bool) ([]byte, error) {
-	f.mut.Lock()
-	defer f.mut.Unlock()
-	if f.requestFn != nil {
-		return f.requestFn(ctx, folder, name, offset, size, hash, fromTemporary)
-	}
-	return f.fileData[name], nil
-}
-
-func (f *fakeConnection) ClusterConfig(protocol.ClusterConfig) {}
-
-func (f *fakeConnection) Ping() bool {
-	f.mut.Lock()
-	defer f.mut.Unlock()
-	return f.closed
-}
-
-func (f *fakeConnection) Closed() bool {
-	f.mut.Lock()
-	defer f.mut.Unlock()
-	return f.closed
-}
-
-func (f *fakeConnection) Statistics() protocol.Statistics {
-	return protocol.Statistics{}
+func (f *fakeConnection) setIndexFn(fn func(_ context.Context, folder string, fs []protocol.FileInfo) error) {
+	f.IndexCalls(fn)
+	f.IndexUpdateCalls(fn)
 }
 
 func (f *fakeConnection) DownloadProgress(_ context.Context, folder string, updates []protocol.FileDownloadProgressUpdate) {
@@ -116,38 +62,48 @@ func (f *fakeConnection) DownloadProgress(_ context.Context, folder string, upda
 	})
 }
 
-func (f *fakeConnection) addFileLocked(name string, flags uint32, ftype protocol.FileInfoType, data []byte, version protocol.Vector) {
+func (f *fakeConnection) addFileLocked(name string, flags uint32, ftype protocol.FileInfoType, data []byte, version protocol.Vector, localFlags uint32) {
 	blockSize := protocol.BlockSize(int64(len(data)))
 	blocks, _ := scanner.Blocks(context.TODO(), bytes.NewReader(data), blockSize, int64(len(data)), nil, true)
 
-	if ftype == protocol.FileInfoTypeFile || ftype == protocol.FileInfoTypeDirectory {
-		f.files = append(f.files, protocol.FileInfo{
-			Name:         name,
-			Type:         ftype,
-			Size:         int64(len(data)),
-			ModifiedS:    time.Now().Unix(),
-			Permissions:  flags,
-			Version:      version,
-			Sequence:     time.Now().UnixNano(),
-			RawBlockSize: int32(blockSize),
-			Blocks:       blocks,
-		})
-	} else {
-		// Symlink
-		f.files = append(f.files, protocol.FileInfo{
-			Name:          name,
-			Type:          ftype,
-			Version:       version,
-			Sequence:      time.Now().UnixNano(),
-			SymlinkTarget: string(data),
-			NoPermissions: true,
-		})
+	file := protocol.FileInfo{
+		Name:       name,
+		Type:       ftype,
+		Version:    version,
+		Sequence:   time.Now().UnixNano(),
+		LocalFlags: localFlags,
 	}
+	switch ftype {
+	case protocol.FileInfoTypeFile, protocol.FileInfoTypeDirectory:
+		file.ModifiedS = time.Now().Unix()
+		file.Permissions = flags
+		if ftype == protocol.FileInfoTypeFile {
+			file.Size = int64(len(data))
+			file.RawBlockSize = blockSize
+			file.Blocks = blocks
+		}
+	default: // Symlink
+		file.Name = name
+		file.Type = ftype
+		file.Version = version
+		file.SymlinkTarget = string(data)
+		file.NoPermissions = true
+	}
+	f.files = append(f.files, file)
 
 	if f.fileData == nil {
 		f.fileData = make(map[string][]byte)
 	}
 	f.fileData[name] = data
+}
+
+func (f *fakeConnection) addFileWithLocalFlags(name string, ftype protocol.FileInfoType, localFlags uint32) {
+	f.mut.Lock()
+	defer f.mut.Unlock()
+
+	var version protocol.Vector
+	version = version.Update(f.id.Short())
+	f.addFileLocked(name, 0, ftype, nil, version, localFlags)
 }
 
 func (f *fakeConnection) addFile(name string, flags uint32, ftype protocol.FileInfoType, data []byte) {
@@ -156,7 +112,7 @@ func (f *fakeConnection) addFile(name string, flags uint32, ftype protocol.FileI
 
 	var version protocol.Vector
 	version = version.Update(f.id.Short())
-	f.addFileLocked(name, flags, ftype, data, version)
+	f.addFileLocked(name, flags, ftype, data, version, 0)
 }
 
 func (f *fakeConnection) updateFile(name string, flags uint32, ftype protocol.FileInfoType, data []byte) {
@@ -166,7 +122,7 @@ func (f *fakeConnection) updateFile(name string, flags uint32, ftype protocol.Fi
 	for i, fi := range f.files {
 		if fi.Name == name {
 			f.files = append(f.files[:i], f.files[i+1:]...)
-			f.addFileLocked(name, flags, ftype, data, fi.Version.Update(f.id.Short()))
+			f.addFileLocked(name, flags, ftype, data, fi.Version.Update(f.id.Short()), 0)
 			return
 		}
 	}
@@ -191,12 +147,16 @@ func (f *fakeConnection) deleteFile(name string) {
 }
 
 func (f *fakeConnection) sendIndexUpdate() {
-	f.model.IndexUpdate(f.id, f.folder, f.files)
+	toSend := make([]protocol.FileInfo, len(f.files))
+	for i := range f.files {
+		toSend[i] = prepareFileInfoForIndex(f.files[i])
+	}
+	f.model.IndexUpdate(f.id, f.folder, toSend)
 }
 
-func addFakeConn(m *model, dev protocol.DeviceID) *fakeConnection {
-	fc := &fakeConnection{id: dev, model: m}
-	m.AddConnection(fc, protocol.HelloResult{})
+func addFakeConn(m *testModel, dev protocol.DeviceID) *fakeConnection {
+	fc := newFakeConnection(dev, m)
+	m.AddConnection(fc, protocol.Hello{})
 
 	m.ClusterConfig(dev, protocol.ClusterConfig{
 		Folders: []protocol.Folder{
@@ -211,51 +171,4 @@ func addFakeConn(m *model, dev protocol.DeviceID) *fakeConnection {
 	})
 
 	return fc
-}
-
-type fakeProtoConn struct {
-	protocol.Connection
-	fakeUnderlyingConn
-}
-
-func newFakeProtoConn(protoConn protocol.Connection) connections.Connection {
-	return &fakeProtoConn{Connection: protoConn}
-}
-
-// fakeUnderlyingConn implements the methods of connections.Connection that are
-// not implemented by protocol.Connection
-type fakeUnderlyingConn struct{}
-
-func (f *fakeUnderlyingConn) RemoteAddr() net.Addr {
-	return &fakeAddr{}
-}
-
-func (f *fakeUnderlyingConn) Type() string {
-	return "fake"
-}
-
-func (f *fakeUnderlyingConn) Crypto() string {
-	return "fake"
-}
-
-func (f *fakeUnderlyingConn) Transport() string {
-	return "fake"
-}
-
-func (f *fakeUnderlyingConn) Priority() int {
-	return 9000
-}
-
-func (f *fakeUnderlyingConn) String() string {
-	return ""
-}
-
-type fakeAddr struct{}
-
-func (fakeAddr) Network() string {
-	return "network"
-}
-
-func (fakeAddr) String() string {
-	return "address"
 }

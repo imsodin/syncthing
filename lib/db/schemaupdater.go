@@ -8,7 +8,6 @@ package db
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -17,23 +16,20 @@ import (
 	"github.com/syncthing/syncthing/lib/protocol"
 )
 
-// List of all dbVersion to dbMinSyncthingVersion pairs for convenience
-//   0: v0.14.0
-//   1: v0.14.46
-//   2: v0.14.48
-//   3-5: v0.14.49
-//   6: v0.14.50
-//   7: v0.14.53
-//   8-9: v1.4.0
-//   10-11: v1.6.0
-//   12-13: v1.7.0
-//   14: v1.9.0
+// dbMigrationVersion is for migrations that do not change the schema and thus
+// do not put restrictions on downgrades (e.g. for repairs after a bugfix).
 const (
 	dbVersion             = 14
+	dbMigrationVersion    = 16
 	dbMinSyncthingVersion = "v1.9.0"
 )
 
-var errFolderMissing = errors.New("folder present in global list but missing in keyer index")
+type migration struct {
+	schemaVersion       int64
+	migrationVersion    int64
+	minSyncthingVersion string
+	migration           func(prevSchema int) error
+}
 
 type databaseDowngradeError struct {
 	minSyncthingVersion string
@@ -46,6 +42,8 @@ func (e *databaseDowngradeError) Error() string {
 	return fmt.Sprintf("Syncthing %s required", e.minSyncthingVersion)
 }
 
+// UpdateSchema updates a possibly outdated database to the current schema and
+// also does repairs where necessary.
 func UpdateSchema(db *Lowlevel) error {
 	updater := &schemaUpdater{db}
 	return updater.updateSchema()
@@ -77,46 +75,69 @@ func (db *schemaUpdater) updateSchema() error {
 		return err
 	}
 
-	if prevVersion == dbVersion {
+	prevMigration, _, err := miscDB.Int64("dbMigrationVersion")
+	if err != nil {
+		return err
+	}
+	// Cover versions before adding `dbMigrationVersion` (== 0) and possible future weirdness.
+	if prevMigration < prevVersion {
+		prevMigration = prevVersion
+	}
+
+	if prevVersion == dbVersion && prevMigration >= dbMigrationVersion {
 		return nil
 	}
 
-	type migration struct {
-		schemaVersion int64
-		migration     func(prevVersion int) error
-	}
-	var migrations = []migration{
-		{1, db.updateSchema0to1},
-		{2, db.updateSchema1to2},
-		{3, db.updateSchema2to3},
-		{5, db.updateSchemaTo5},
-		{6, db.updateSchema5to6},
-		{7, db.updateSchema6to7},
-		{9, db.updateSchemaTo9},
-		{10, db.updateSchemaTo10},
-		{11, db.updateSchemaTo11},
-		{13, db.updateSchemaTo13},
-		{14, db.updateSchemaTo14},
+	migrations := []migration{
+		{1, 1, "v0.14.0", db.updateSchema0to1},
+		{2, 2, "v0.14.46", db.updateSchema1to2},
+		{3, 3, "v0.14.48", db.updateSchema2to3},
+		{5, 5, "v0.14.49", db.updateSchemaTo5},
+		{6, 6, "v0.14.50", db.updateSchema5to6},
+		{7, 7, "v0.14.53", db.updateSchema6to7},
+		{9, 9, "v1.4.0", db.updateSchemaTo9},
+		{10, 10, "v1.6.0", db.updateSchemaTo10},
+		{11, 11, "v1.6.0", db.updateSchemaTo11},
+		{13, 13, "v1.7.0", db.updateSchemaTo13},
+		{14, 14, "v1.9.0", db.updateSchemaTo14},
+		{14, 16, "v1.9.0", db.checkRepairMigration},
 	}
 
 	for _, m := range migrations {
-		if prevVersion < m.schemaVersion {
-			l.Infof("Migrating database to schema version %d...", m.schemaVersion)
+		if prevMigration < m.migrationVersion {
+			l.Infof("Running database migration %d...", m.migrationVersion)
 			if err := m.migration(int(prevVersion)); err != nil {
-				return fmt.Errorf("failed migrating to version %v: %w", m.schemaVersion, err)
+				return fmt.Errorf("failed to do migration %v: %w", m.migrationVersion, err)
+			}
+			if err := db.writeVersions(m, miscDB); err != nil {
+				return fmt.Errorf("failed to write versions after migration %v: %w", m.migrationVersion, err)
 			}
 		}
 	}
 
-	if err := miscDB.PutInt64("dbVersion", dbVersion); err != nil {
-		return err
-	}
-	if err := miscDB.PutString("dbMinSyncthingVersion", dbMinSyncthingVersion); err != nil {
-		return err
+	if err := db.writeVersions(migration{
+		schemaVersion:       dbVersion,
+		migrationVersion:    dbMigrationVersion,
+		minSyncthingVersion: dbMinSyncthingVersion,
+	}, miscDB); err != nil {
+		return fmt.Errorf("failed to write versions after migrations: %w", err)
 	}
 
 	l.Infoln("Compacting database after migration...")
 	return db.Compact()
+}
+
+func (*schemaUpdater) writeVersions(m migration, miscDB *NamespacedKV) error {
+	if err := miscDB.PutInt64("dbVersion", m.schemaVersion); err != nil && err == nil {
+		return err
+	}
+	if err := miscDB.PutString("dbMinSyncthingVersion", m.minSyncthingVersion); err != nil && err == nil {
+		return err
+	}
+	if err := miscDB.PutInt64("dbMigrationVersion", m.migrationVersion); err != nil && err == nil {
+		return err
+	}
+	return nil
 }
 
 func (db *schemaUpdater) updateSchema0to1(_ int) error {
@@ -198,7 +219,7 @@ func (db *schemaUpdater) updateSchema0to1(_ int) error {
 			// probably can't happen
 			continue
 		}
-		if f.Type == protocol.FileInfoTypeDeprecatedSymlinkDirectory || f.Type == protocol.FileInfoTypeDeprecatedSymlinkFile {
+		if f.Type == protocol.FileInfoTypeSymlinkDirectory || f.Type == protocol.FileInfoTypeSymlinkFile {
 			f.Type = protocol.FileInfoTypeSymlink
 			bs, err := f.Marshal()
 			if err != nil {
@@ -695,7 +716,7 @@ func (db *schemaUpdater) updateSchemaTo14(_ int) error {
 	var key, gk []byte
 	for _, folderStr := range db.ListFolders() {
 		folder := []byte(folderStr)
-		meta := newMetadataTracker(db.keyer)
+		meta := newMetadataTracker(db.keyer, db.evLogger)
 		meta.counts.Created = 0 // Recalculate metadata afterwards
 
 		t, err := db.newReadWriteTransaction(meta.CommitHook(folder))
@@ -705,6 +726,9 @@ func (db *schemaUpdater) updateSchemaTo14(_ int) error {
 		defer t.close()
 
 		key, err = t.keyer.GenerateDeviceFileKey(key, folder, protocol.LocalDeviceID[:], nil)
+		if err != nil {
+			return err
+		}
 		it, err := t.NewPrefixIterator(key)
 		if err != nil {
 			return err
@@ -724,7 +748,7 @@ func (db *schemaUpdater) updateSchemaTo14(_ int) error {
 				continue
 			}
 
-			fi.SetMustRescan(protocol.LocalDeviceID.Short())
+			fi.SetMustRescan()
 			if err = t.putFile(it.Key(), fi); err != nil {
 				return err
 			}
@@ -746,6 +770,16 @@ func (db *schemaUpdater) updateSchemaTo14(_ int) error {
 		t.close()
 	}
 
+	return nil
+}
+
+func (db *schemaUpdater) checkRepairMigration(_ int) error {
+	for _, folder := range db.ListFolders() {
+		_, err := db.getMetaAndCheckGCLocked(folder)
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

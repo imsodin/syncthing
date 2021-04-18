@@ -15,22 +15,29 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shirou/gopsutil/disk"
+	"github.com/shirou/gopsutil/v3/disk"
 )
 
 var (
-	ErrInvalidFilename = errors.New("filename is invalid")
-	ErrNotRelative     = errors.New("not a relative path")
+	errInvalidFilenameEmpty               = errors.New("name is invalid, must not be empty")
+	errInvalidFilenameWindowsSpacePeriod  = errors.New("name is invalid, must not end in space or period on Windows")
+	errInvalidFilenameWindowsReservedName = errors.New("name is invalid, contains Windows reserved name (NUL, COM1, etc.)")
+	errInvalidFilenameWindowsReservedChar = errors.New("name is invalid, contains Windows reserved character (?, *, etc.)")
+	errNotRelative                        = errors.New("not a relative path")
 )
 
-func WithJunctionsAsDirs() Option {
-	return func(fs Filesystem) {
-		if basic, ok := fs.(*BasicFilesystem); !ok {
-			l.Warnln("WithJunctionsAsDirs must only be used with FilesystemTypeBasic")
-		} else {
-			basic.junctionsAsDirs = true
-		}
+type OptionJunctionsAsDirs struct{}
+
+func (o *OptionJunctionsAsDirs) apply(fs Filesystem) {
+	if basic, ok := fs.(*BasicFilesystem); !ok {
+		l.Warnln("WithJunctionsAsDirs must only be used with FilesystemTypeBasic")
+	} else {
+		basic.junctionsAsDirs = true
 	}
+}
+
+func (o *OptionJunctionsAsDirs) String() string {
+	return "junctionsAsDirs"
 }
 
 // The BasicFilesystem implements all aspects by delegating to package os.
@@ -38,6 +45,7 @@ func WithJunctionsAsDirs() Option {
 type BasicFilesystem struct {
 	root            string
 	junctionsAsDirs bool
+	options         []Option
 }
 
 func newBasicFilesystem(root string, opts ...Option) *BasicFilesystem {
@@ -76,10 +84,11 @@ func newBasicFilesystem(root string, opts ...Option) *BasicFilesystem {
 	}
 
 	fs := &BasicFilesystem{
-		root: root,
+		root:    root,
+		options: opts,
 	}
 	for _, opt := range opts {
-		opt(fs)
+		opt.apply(fs)
 	}
 	return fs
 }
@@ -95,7 +104,7 @@ func (f *BasicFilesystem) rooted(rel string) (string, error) {
 func rooted(rel, root string) (string, error) {
 	// The root must not be empty.
 	if root == "" {
-		return "", ErrInvalidFilename
+		return "", errInvalidFilenameEmpty
 	}
 
 	var err error
@@ -292,8 +301,8 @@ func (f *BasicFilesystem) Usage(name string) (Usage, error) {
 		return Usage{}, err
 	}
 	return Usage{
-		Free:  int64(u.Free),
-		Total: int64(u.Total),
+		Free:  u.Free,
+		Total: u.Total,
 	}, nil
 }
 
@@ -303,6 +312,10 @@ func (f *BasicFilesystem) Type() FilesystemType {
 
 func (f *BasicFilesystem) URI() string {
 	return strings.TrimPrefix(f.root, `\\?\`)
+}
+
+func (f *BasicFilesystem) Options() []Option {
+	return f.options
 }
 
 func (f *BasicFilesystem) SameFile(fi1, fi2 FileInfo) bool {

@@ -28,6 +28,7 @@ import (
 
 	"github.com/oschwald/geoip2-golang"
 
+	"github.com/syncthing/syncthing/lib/upgrade"
 	"github.com/syncthing/syncthing/lib/ur/contract"
 )
 
@@ -88,7 +89,7 @@ var funcs = map[string]interface{}{
 			parts = append(parts, part)
 		}
 		if len(input) > 0 {
-			parts = append(parts, input[:])
+			parts = append(parts, input)
 		}
 		return parts[whichPart-1]
 	},
@@ -724,8 +725,8 @@ func getReport(db *sql.DB) map[string]interface{} {
 
 			if rep.NATType != "" {
 				natType := rep.NATType
-				natType = strings.Replace(natType, "unknown", "Unknown", -1)
-				natType = strings.Replace(natType, "Symetric", "Symmetric", -1)
+				natType = strings.ReplaceAll(natType, "unknown", "Unknown")
+				natType = strings.ReplaceAll(natType, "Symetric", "Symmetric")
 				add(featureGroups["Various"]["v3"], "NAT Type", natType, 1)
 			}
 
@@ -744,6 +745,7 @@ func getReport(db *sql.DB) map[string]interface{} {
 			inc(features["Folder"]["v3"], "Weak hash, custom threshold", rep.FolderUsesV3.CustomWeakHashThreshold)
 			inc(features["Folder"]["v3"], "Filesystem watcher", rep.FolderUsesV3.FsWatcherEnabled)
 			inc(features["Folder"]["v3"], "Case sensitive FS", rep.FolderUsesV3.CaseSensitiveFS)
+			inc(features["Folder"]["v3"], "Mode, receive encrypted", rep.FolderUsesV3.ReceiveEncrypted)
 
 			add(featureGroups["Folder"]["v3"], "Conflicts", "Disabled", rep.FolderUsesV3.ConflictsDisabled)
 			add(featureGroups["Folder"]["v3"], "Conflicts", "Unlimited", rep.FolderUsesV3.ConflictsUnlimited)
@@ -752,6 +754,8 @@ func getReport(db *sql.DB) map[string]interface{} {
 			for key, value := range rep.FolderUsesV3.PullOrder {
 				add(featureGroups["Folder"]["v3"], "Pull Order", prettyCase(key), value)
 			}
+
+			inc(features["Device"]["v3"], "Untrusted", rep.DeviceUsesV3.Untrusted)
 
 			totals["GUI"] += rep.GUIStats.Enabled
 
@@ -919,7 +923,7 @@ func getReport(db *sql.DB) map[string]interface{} {
 }
 
 var (
-	plusRe  = regexp.MustCompile(`\+.*$`)
+	plusRe  = regexp.MustCompile(`(\+.*|\.dev\..*)$`)
 	plusStr = "(+dev)"
 )
 
@@ -978,7 +982,9 @@ func (s *summary) MarshalJSON() ([]byte, error) {
 	for v := range s.versions {
 		versions = append(versions, v)
 	}
-	sort.Strings(versions)
+	sort.Slice(versions, func(a, b int) bool {
+		return upgrade.CompareVersions(versions[a], versions[b]) < 0
+	})
 
 	var filtered []string
 	for _, v := range versions {

@@ -10,10 +10,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"os"
 	"testing"
 
 	"github.com/syncthing/syncthing/lib/db/backend"
+	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/protocol"
 )
@@ -25,7 +25,7 @@ func genBlocks(n int) []protocol.BlockInfo {
 		for j := range h {
 			h[j] = byte(i + j)
 		}
-		b[i].Size = int32(i)
+		b[i].Size = i
 		b[i].Hash = h
 	}
 	return b
@@ -36,17 +36,17 @@ func TestIgnoredFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db := NewLowlevel(ldb)
+	db := newLowlevel(t, ldb)
 	defer db.Close()
 	if err := UpdateSchema(db); err != nil {
 		t.Fatal(err)
 	}
 
-	fs := NewFileSet("test", fs.NewFilesystem(fs.FilesystemTypeBasic, "."), db)
+	fs := newFileSet(t, "test", fs.NewFilesystem(fs.FilesystemTypeBasic, "."), db)
 
 	// The contents of the database are like this:
 	//
-	// 	fs := NewFileSet("test", fs.NewFilesystem(fs.FilesystemTypeBasic, "."), db)
+	// 	fs := newFileSet(t, "test", fs.NewFilesystem(fs.FilesystemTypeBasic, "."), db)
 	// 	fs.Update(protocol.LocalDeviceID, []protocol.FileInfo{
 	// 		{ // invalid (ignored) file
 	// 			Name:    "foo",
@@ -77,7 +77,7 @@ func TestIgnoredFiles(t *testing.T) {
 	// Local files should have the "ignored" bit in addition to just being
 	// generally invalid if we want to look at the simulation of that bit.
 
-	snap := fs.Snapshot()
+	snap := snapshot(t, fs)
 	defer snap.Release()
 	fi, ok := snap.Get(protocol.LocalDeviceID, "foo")
 	if !ok {
@@ -165,7 +165,7 @@ func TestUpdate0to3(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	db := NewLowlevel(ldb)
+	db := newLowlevel(t, ldb)
 	defer db.Close()
 	updater := schemaUpdater{db}
 
@@ -262,6 +262,9 @@ func TestUpdate0to3(t *testing.T) {
 			t.Fatal(err)
 		}
 		key, err = trans.keyer.GenerateDeviceFileKey(key, folder, vl.Versions[0].Device, name)
+		if err != nil {
+			t.Fatal(err)
+		}
 		fi, ok, err := trans.getFileTrunc(key, false)
 		if err != nil {
 			t.Fatal(err)
@@ -294,7 +297,7 @@ func TestUpdate0to3(t *testing.T) {
 
 // TestRepairSequence checks that a few hand-crafted messed-up sequence entries get fixed.
 func TestRepairSequence(t *testing.T) {
-	db := NewLowlevel(backend.OpenMemory())
+	db := newLowlevelMemory(t)
 	defer db.Close()
 
 	folderStr := "test"
@@ -398,7 +401,7 @@ func TestRepairSequence(t *testing.T) {
 	// Loading the metadata for the first time means a "re"calculation happens,
 	// along which the sequences get repaired too.
 	db.gcMut.RLock()
-	_ = db.loadMetadataTracker(folderStr)
+	_, err = db.loadMetadataTracker(folderStr)
 	db.gcMut.RUnlock()
 	if err != nil {
 		t.Fatal(err)
@@ -467,7 +470,7 @@ func TestRepairSequence(t *testing.T) {
 }
 
 func TestDowngrade(t *testing.T) {
-	db := NewLowlevel(backend.OpenMemory())
+	db := newLowlevelMemory(t)
 	defer db.Close()
 	// sets the min version etc
 	if err := UpdateSchema(db); err != nil {
@@ -492,10 +495,10 @@ func TestDowngrade(t *testing.T) {
 }
 
 func TestCheckGlobals(t *testing.T) {
-	db := NewLowlevel(backend.OpenMemory())
+	db := newLowlevelMemory(t)
 	defer db.Close()
 
-	fs := NewFileSet("test", fs.NewFilesystem(fs.FilesystemTypeFake, ""), db)
+	fs := newFileSet(t, "test", fs.NewFilesystem(fs.FilesystemTypeFake, ""), db)
 
 	// Add any file
 	name := "foo"
@@ -513,8 +516,10 @@ func TestCheckGlobals(t *testing.T) {
 	}
 
 	// Clean up global entry of the now missing file
-	if err := db.checkGlobals([]byte(fs.folder)); err != nil {
+	if repaired, err := db.checkGlobals(fs.folder); err != nil {
 		t.Fatal(err)
+	} else if repaired != 1 {
+		t.Error("Expected 1 repaired global item, got", repaired)
 	}
 
 	// Check that the global entry is gone
@@ -533,14 +538,17 @@ func TestUpdateTo10(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db := NewLowlevel(ldb)
+	db := newLowlevel(t, ldb)
 	defer db.Close()
 
 	UpdateSchema(db)
 
 	folder := "test"
 
-	meta := db.getMetaAndCheck(folder)
+	meta, err := db.getMetaAndCheck(folder)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	empty := Counts{}
 
@@ -644,9 +652,9 @@ func TestDropDuplicates(t *testing.T) {
 func TestGCIndirect(t *testing.T) {
 	// Verify that the gcIndirect run actually removes block lists.
 
-	db := NewLowlevel(backend.OpenMemory())
+	db := newLowlevelMemory(t)
 	defer db.Close()
-	meta := newMetadataTracker(db.keyer)
+	meta := newMetadataTracker(db.keyer, events.NoopLogger)
 
 	// Add three files with different block lists
 
@@ -732,7 +740,7 @@ func TestGCIndirect(t *testing.T) {
 }
 
 func TestUpdateTo14(t *testing.T) {
-	db := NewLowlevel(backend.OpenMemory())
+	db := newLowlevelMemory(t)
 	defer db.Close()
 
 	folderStr := "default"
@@ -742,7 +750,10 @@ func TestUpdateTo14(t *testing.T) {
 	file.BlocksHash = protocol.BlocksHash(file.Blocks)
 	fileWOBlocks := file
 	fileWOBlocks.Blocks = nil
-	meta := db.loadMetadataTracker(folderStr)
+	meta, err := db.loadMetadataTracker(folderStr)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Initally add the correct file the usual way, all good here.
 	if err := db.updateLocalFiles(folder, []protocol.FileInfo{file}, meta); err != nil {
@@ -801,12 +812,7 @@ func TestFlushRecursion(t *testing.T) {
 	// Verify that a commit hook can write to the transaction without
 	// causing another flush and thus recursion.
 
-	// Badger doesn't work like this.
-	if os.Getenv("USE_BADGER") != "" {
-		t.Skip("Not supported on Badger")
-	}
-
-	db := NewLowlevel(backend.OpenMemory())
+	db := newLowlevelMemory(t)
 	defer db.Close()
 
 	// A commit hook that writes a small piece of data to the transaction.
@@ -844,11 +850,11 @@ func TestFlushRecursion(t *testing.T) {
 }
 
 func TestCheckLocalNeed(t *testing.T) {
-	db := NewLowlevel(backend.OpenMemory())
+	db := newLowlevelMemory(t)
 	defer db.Close()
 
 	folderStr := "test"
-	fs := NewFileSet(folderStr, fs.NewFilesystem(fs.FilesystemTypeFake, ""), db)
+	fs := newFileSet(t, folderStr, fs.NewFilesystem(fs.FilesystemTypeFake, ""), db)
 
 	// Add files such that we are in sync for a and b, and need c and d.
 	files := []protocol.FileInfo{
@@ -863,7 +869,7 @@ func TestCheckLocalNeed(t *testing.T) {
 	fs.Update(remoteDevice0, files)
 
 	checkNeed := func() {
-		snap := fs.Snapshot()
+		snap := snapshot(t, fs)
 		defer snap.Release()
 		c := snap.NeedSize(protocol.LocalDeviceID)
 		if c.Files != 2 {
@@ -916,6 +922,79 @@ func TestCheckLocalNeed(t *testing.T) {
 	}
 
 	checkNeed()
+}
+
+func TestDuplicateNeedCount(t *testing.T) {
+	db := newLowlevelMemory(t)
+	defer db.Close()
+
+	folder := "test"
+	testFs := fs.NewFilesystem(fs.FilesystemTypeFake, "")
+
+	fs := newFileSet(t, folder, testFs, db)
+	files := []protocol.FileInfo{{Name: "foo", Version: protocol.Vector{}.Update(myID), Sequence: 1}}
+	fs.Update(protocol.LocalDeviceID, files)
+	files[0].Version = files[0].Version.Update(remoteDevice0.Short())
+	fs.Update(remoteDevice0, files)
+
+	db.checkRepair()
+
+	fs = newFileSet(t, folder, testFs, db)
+	found := false
+	for _, c := range fs.meta.counts.Counts {
+		if bytes.Equal(protocol.LocalDeviceID[:], c.DeviceID) && c.LocalFlags == needFlag {
+			if found {
+				t.Fatal("second need count for local device encountered")
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no need count for local device encountered")
+	}
+}
+
+func TestNeedAfterDropGlobal(t *testing.T) {
+	db := newLowlevelMemory(t)
+	defer db.Close()
+
+	folder := "test"
+	testFs := fs.NewFilesystem(fs.FilesystemTypeFake, "")
+
+	fs := newFileSet(t, folder, testFs, db)
+
+	// Initial:
+	// Three devices and a file "test": local has Version 1, remoteDevice0
+	// Version 2 and remoteDevice2 doesn't have it.
+	// All of them have "bar", just so the db knows about remoteDevice2.
+	files := []protocol.FileInfo{
+		{Name: "foo", Version: protocol.Vector{}.Update(myID), Sequence: 1},
+		{Name: "bar", Version: protocol.Vector{}.Update(myID), Sequence: 2},
+	}
+	fs.Update(protocol.LocalDeviceID, files)
+	files[0].Version = files[0].Version.Update(myID)
+	fs.Update(remoteDevice0, files)
+	fs.Update(remoteDevice1, files[1:])
+
+	// remoteDevice1 needs one file: test
+	snap := snapshot(t, fs)
+	c := snap.NeedSize(remoteDevice1)
+	if c.Files != 1 {
+		t.Errorf("Expected 1 needed files initially, got %v", c.Files)
+	}
+	snap.Release()
+
+	// Drop remoteDevice0, i.e. remove all their files from db.
+	// That changes the global file, which is now what local has.
+	fs.Drop(remoteDevice0)
+
+	// remoteDevice1 still needs test.
+	snap = snapshot(t, fs)
+	c = snap.NeedSize(remoteDevice1)
+	if c.Files != 1 {
+		t.Errorf("Expected still 1 needed files, got %v", c.Files)
+	}
+	snap.Release()
 }
 
 func numBlockLists(db *Lowlevel) (int, error) {

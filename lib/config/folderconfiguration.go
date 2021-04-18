@@ -10,10 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
-	"github.com/shirou/gopsutil/disk"
+	"github.com/shirou/gopsutil/v3/disk"
 
 	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/protocol"
@@ -26,22 +27,12 @@ var (
 	ErrMarkerMissing    = errors.New("folder marker missing (this indicates potential data loss, search docs/forum to get information about how to proceed)")
 )
 
-const DefaultMarkerName = ".stfolder"
-
-func NewFolderConfiguration(myID protocol.DeviceID, id, label string, fsType fs.FilesystemType, path string) FolderConfiguration {
-	f := FolderConfiguration{
-		ID:             id,
-		Label:          label,
-		Devices:        []FolderDeviceConfiguration{{DeviceID: myID}},
-		FilesystemType: fsType,
-		Path:           path,
-	}
-
-	util.SetDefaults(&f)
-
-	f.prepare()
-	return f
-}
+const (
+	DefaultMarkerName          = ".stfolder"
+	EncryptionTokenName        = "syncthing-encryption_password_token"
+	maxConcurrentWritesDefault = 2
+	maxConcurrentWritesLimit   = 64
+)
 
 func (f FolderConfiguration) Copy() FolderConfiguration {
 	c := f
@@ -56,7 +47,7 @@ func (f FolderConfiguration) Filesystem() fs.Filesystem {
 	// cfg.Folders["default"].Filesystem() should be valid.
 	var opts []fs.Option
 	if f.FilesystemType == fs.FilesystemTypeBasic && f.JunctionsAsDirs {
-		opts = append(opts, fs.WithJunctionsAsDirs())
+		opts = append(opts, new(fs.OptionJunctionsAsDirs))
 	}
 	filesystem := fs.NewFilesystem(f.FilesystemType, f.Path, opts...)
 	if !f.CaseSensitiveFS {
@@ -71,7 +62,7 @@ func (f FolderConfiguration) ModTimeWindow() time.Duration {
 		if usage, err := disk.Usage(f.Filesystem().URI()); err != nil {
 			dur = 2 * time.Second
 			l.Debugf(`Detecting FS at "%v" on android: Setting mtime window to 2s: err == "%v"`, f.Path, err)
-		} else if usage.Fstype == "" || strings.Contains(strings.ToLower(usage.Fstype), "fat") {
+		} else if usage.Fstype == "" || strings.Contains(strings.ToLower(usage.Fstype), "fat") || strings.Contains(strings.ToLower(usage.Fstype), "msdos") {
 			dur = 2 * time.Second
 			l.Debugf(`Detecting FS at "%v" on android: Setting mtime window to 2s: usage.Fstype == "%v"`, f.Path, usage.Fstype)
 		} else {
@@ -178,7 +169,19 @@ func (f *FolderConfiguration) DeviceIDs() []protocol.DeviceID {
 	return deviceIDs
 }
 
-func (f *FolderConfiguration) prepare() {
+func (f *FolderConfiguration) prepare(myID protocol.DeviceID, existingDevices map[protocol.DeviceID]bool) {
+	// Ensure that
+	// - any loose devices are not present in the wrong places
+	// - there are no duplicate devices
+	// - we are part of the devices
+	f.Devices = ensureExistingDevices(f.Devices, existingDevices)
+	f.Devices = ensureNoDuplicateFolderDevices(f.Devices)
+	f.Devices = ensureDevicePresent(f.Devices, myID)
+
+	sort.Slice(f.Devices, func(a, b int) bool {
+		return f.Devices[a].DeviceID.Compare(f.Devices[b].DeviceID) == -1
+	})
+
 	if f.RescanIntervalS > MaxRescanIntervalS {
 		f.RescanIntervalS = MaxRescanIntervalS
 	} else if f.RescanIntervalS < 0 {
@@ -190,9 +193,6 @@ func (f *FolderConfiguration) prepare() {
 		f.FSWatcherDelayS = 10
 	}
 
-	if f.Versioning.Params == nil {
-		f.Versioning.Params = make(map[string]string)
-	}
 	if f.Versioning.CleanupIntervalS > MaxRescanIntervalS {
 		f.Versioning.CleanupIntervalS = MaxRescanIntervalS
 	} else if f.Versioning.CleanupIntervalS < 0 {
@@ -205,6 +205,16 @@ func (f *FolderConfiguration) prepare() {
 
 	if f.MarkerName == "" {
 		f.MarkerName = DefaultMarkerName
+	}
+
+	if f.MaxConcurrentWrites <= 0 {
+		f.MaxConcurrentWrites = maxConcurrentWritesDefault
+	} else if f.MaxConcurrentWrites > maxConcurrentWritesLimit {
+		f.MaxConcurrentWrites = maxConcurrentWritesLimit
+	}
+
+	if f.Type == FolderTypeReceiveEncrypted {
+		f.IgnorePerms = true
 	}
 }
 
@@ -226,16 +236,21 @@ func (f FolderConfiguration) RequiresRestartOnly() FolderConfiguration {
 	return copy
 }
 
-func (f *FolderConfiguration) SharedWith(device protocol.DeviceID) bool {
+func (f *FolderConfiguration) Device(device protocol.DeviceID) (FolderDeviceConfiguration, bool) {
 	for _, dev := range f.Devices {
 		if dev.DeviceID == device {
-			return true
+			return dev, true
 		}
 	}
-	return false
+	return FolderDeviceConfiguration{}, false
 }
 
-func (f *FolderConfiguration) CheckAvailableSpace(req int64) error {
+func (f *FolderConfiguration) SharedWith(device protocol.DeviceID) bool {
+	_, ok := f.Device(device)
+	return ok
+}
+
+func (f *FolderConfiguration) CheckAvailableSpace(req uint64) error {
 	val := f.MinDiskFree.BaseValue()
 	if val <= 0 {
 		return nil
@@ -245,11 +260,8 @@ func (f *FolderConfiguration) CheckAvailableSpace(req int64) error {
 	if err != nil {
 		return nil
 	}
-	usage.Free -= req
-	if usage.Free > 0 {
-		if err := CheckFreeSpace(f.MinDiskFree, usage); err == nil {
-			return nil
-		}
+	if !checkAvailableSpace(req, f.MinDiskFree, usage) {
+		return fmt.Errorf("insufficient space in %v %v", fs.Type(), fs.URI())
 	}
-	return fmt.Errorf("insufficient space in %v %v", fs.Type(), fs.URI())
+	return nil
 }

@@ -19,7 +19,7 @@ import (
 	"github.com/syncthing/syncthing/lib/dialer"
 	"github.com/syncthing/syncthing/lib/nat"
 	"github.com/syncthing/syncthing/lib/relay/client"
-	"github.com/syncthing/syncthing/lib/util"
+	"github.com/syncthing/syncthing/lib/svcutil"
 )
 
 func init() {
@@ -30,7 +30,7 @@ func init() {
 }
 
 type relayListener struct {
-	util.ServiceWithError
+	svcutil.ServiceWithError
 	onAddressesChangedNotifier
 
 	uri     *url.URL
@@ -53,8 +53,7 @@ func (t *relayListener) serve(ctx context.Context) error {
 
 	t.mut.Lock()
 	t.client = clnt
-	go clnt.Serve()
-	defer clnt.Stop()
+	go clnt.Serve(ctx)
 	t.mut.Unlock()
 
 	// Start with nil, so that we send a addresses changed notification as soon as we connect somewhere.
@@ -106,7 +105,7 @@ func (t *relayListener) serve(ctx context.Context) error {
 				continue
 			}
 
-			t.conns <- internalConn{tc, connTypeRelayServer, relayPriority}
+			t.conns <- newInternalConn(tc, connTypeRelayServer, relayPriority)
 
 		// Poor mans notifier that informs the connection service that the
 		// relay URI has changed. This can only happen when we connect to a
@@ -120,7 +119,7 @@ func (t *relayListener) serve(ctx context.Context) error {
 			}
 
 		case <-ctx.Done():
-			return nil
+			return ctx.Err()
 		}
 	}
 }
@@ -185,7 +184,7 @@ func (f *relayListenerFactory) New(uri *url.URL, cfg config.Wrapper, tlsCfg *tls
 		conns:   conns,
 		factory: f,
 	}
-	t.ServiceWithError = util.AsServiceWithError(t.serve, t.String())
+	t.ServiceWithError = svcutil.AsService(t.serve, t.String())
 	return t
 }
 

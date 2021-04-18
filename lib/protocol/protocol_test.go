@@ -31,10 +31,12 @@ func TestPing(t *testing.T) {
 	ar, aw := io.Pipe()
 	br, bw := io.Pipe()
 
-	c0 := NewConnection(c0ID, ar, bw, newTestModel(), "name", CompressAlways).(wireFormatConnection).Connection.(*rawConnection)
+	c0 := getRawConnection(NewConnection(c0ID, ar, bw, testutils.NoopCloser{}, newTestModel(), new(mockedConnectionInfo), CompressionAlways, nil))
 	c0.Start()
-	c1 := NewConnection(c1ID, br, aw, newTestModel(), "name", CompressAlways).(wireFormatConnection).Connection.(*rawConnection)
+	defer closeAndWait(c0, ar, bw)
+	c1 := getRawConnection(NewConnection(c1ID, br, aw, testutils.NoopCloser{}, newTestModel(), new(mockedConnectionInfo), CompressionAlways, nil))
 	c1.Start()
+	defer closeAndWait(c1, ar, bw)
 	c0.ClusterConfig(ClusterConfig{})
 	c1.ClusterConfig(ClusterConfig{})
 
@@ -55,10 +57,12 @@ func TestClose(t *testing.T) {
 	ar, aw := io.Pipe()
 	br, bw := io.Pipe()
 
-	c0 := NewConnection(c0ID, ar, bw, m0, "name", CompressAlways).(wireFormatConnection).Connection.(*rawConnection)
+	c0 := getRawConnection(NewConnection(c0ID, ar, bw, testutils.NoopCloser{}, m0, new(mockedConnectionInfo), CompressionAlways, nil))
 	c0.Start()
-	c1 := NewConnection(c1ID, br, aw, m1, "name", CompressAlways)
+	defer closeAndWait(c0, ar, bw)
+	c1 := NewConnection(c1ID, br, aw, testutils.NoopCloser{}, m1, new(mockedConnectionInfo), CompressionAlways, nil)
 	c1.Start()
+	defer closeAndWait(c1, ar, bw)
 	c0.ClusterConfig(ClusterConfig{})
 	c1.ClusterConfig(ClusterConfig{})
 
@@ -80,7 +84,7 @@ func TestClose(t *testing.T) {
 	c0.Index(ctx, "default", nil)
 	c0.Index(ctx, "default", nil)
 
-	if _, err := c0.Request(ctx, "default", "foo", 0, 0, nil, 0, false); err == nil {
+	if _, err := c0.Request(ctx, "default", "foo", 0, 0, 0, nil, 0, false); err == nil {
 		t.Error("Request should return an error")
 	}
 }
@@ -97,8 +101,10 @@ func TestCloseOnBlockingSend(t *testing.T) {
 
 	m := newTestModel()
 
-	c := NewConnection(c0ID, &testutils.BlockingRW{}, &testutils.BlockingRW{}, m, "name", CompressAlways).(wireFormatConnection).Connection.(*rawConnection)
+	rw := testutils.NewBlockingRW()
+	c := getRawConnection(NewConnection(c0ID, rw, rw, testutils.NoopCloser{}, m, new(mockedConnectionInfo), CompressionAlways, nil))
 	c.Start()
+	defer closeAndWait(c, rw)
 
 	wg := sync.WaitGroup{}
 
@@ -147,10 +153,12 @@ func TestCloseRace(t *testing.T) {
 	ar, aw := io.Pipe()
 	br, bw := io.Pipe()
 
-	c0 := NewConnection(c0ID, ar, bw, m0, "c0", CompressNever).(wireFormatConnection).Connection.(*rawConnection)
+	c0 := getRawConnection(NewConnection(c0ID, ar, bw, testutils.NoopCloser{}, m0, new(mockedConnectionInfo), CompressionNever, nil))
 	c0.Start()
-	c1 := NewConnection(c1ID, br, aw, m1, "c1", CompressNever)
+	defer closeAndWait(c0, ar, bw)
+	c1 := NewConnection(c1ID, br, aw, testutils.NoopCloser{}, m1, new(mockedConnectionInfo), CompressionNever, nil)
 	c1.Start()
+	defer closeAndWait(c1, ar, bw)
 	c0.ClusterConfig(ClusterConfig{})
 	c1.ClusterConfig(ClusterConfig{})
 
@@ -184,8 +192,10 @@ func TestCloseRace(t *testing.T) {
 func TestClusterConfigFirst(t *testing.T) {
 	m := newTestModel()
 
-	c := NewConnection(c0ID, &testutils.BlockingRW{}, &testutils.NoopRW{}, m, "name", CompressAlways).(wireFormatConnection).Connection.(*rawConnection)
+	rw := testutils.NewBlockingRW()
+	c := getRawConnection(NewConnection(c0ID, rw, &testutils.NoopRW{}, testutils.NoopCloser{}, m, new(mockedConnectionInfo), CompressionAlways, nil))
 	c.Start()
+	defer closeAndWait(c, rw)
 
 	select {
 	case c.outbox <- asyncMessage{&Ping{}, nil}:
@@ -234,8 +244,10 @@ func TestCloseTimeout(t *testing.T) {
 
 	m := newTestModel()
 
-	c := NewConnection(c0ID, &testutils.BlockingRW{}, &testutils.BlockingRW{}, m, "name", CompressAlways).(wireFormatConnection).Connection.(*rawConnection)
+	rw := testutils.NewBlockingRW()
+	c := getRawConnection(NewConnection(c0ID, rw, rw, testutils.NoopCloser{}, m, new(mockedConnectionInfo), CompressionAlways, nil))
 	c.Start()
+	defer closeAndWait(c, rw)
 
 	done := make(chan struct{})
 	go func() {
@@ -260,6 +272,12 @@ func TestMarshalIndexMessage(t *testing.T) {
 			m1.Files = nil
 		}
 		for i, f := range m1.Files {
+			if len(f.BlocksHash) == 0 {
+				m1.Files[i].BlocksHash = nil
+			}
+			if len(f.VersionHash) == 0 {
+				m1.Files[i].VersionHash = nil
+			}
 			if len(f.Blocks) == 0 {
 				m1.Files[i].Blocks = nil
 			} else {
@@ -272,6 +290,9 @@ func TestMarshalIndexMessage(t *testing.T) {
 			}
 			if len(f.Version.Counters) == 0 {
 				m1.Files[i].Version.Counters = nil
+			}
+			if len(f.Encrypted) == 0 {
+				m1.Files[i].Encrypted = nil
 			}
 		}
 
@@ -330,7 +351,16 @@ func TestMarshalClusterConfigMessage(t *testing.T) {
 			if len(m1.Folders[i].Devices) == 0 {
 				m1.Folders[i].Devices = nil
 			}
+			for j := range m1.Folders[i].Devices {
+				if len(m1.Folders[i].Devices[j].Addresses) == 0 {
+					m1.Folders[i].Devices[j].Addresses = nil
+				}
+				if len(m1.Folders[i].Devices[j].EncryptionPasswordToken) == 0 {
+					m1.Folders[i].Devices[j].EncryptionPasswordToken = nil
+				}
+			}
 		}
+
 		return testMarshal(t, "clusterconfig", &m1, &ClusterConfig{})
 	}
 
@@ -362,7 +392,10 @@ func TestMarshalFDPU(t *testing.T) {
 		if len(m1.Version.Counters) == 0 {
 			m1.Version.Counters = nil
 		}
-		return testMarshal(t, "close", &m1, &FileDownloadProgressUpdate{})
+		if len(m1.BlockIndexes) == 0 {
+			m1.BlockIndexes = nil
+		}
+		return testMarshal(t, "fdpu", &m1, &FileDownloadProgressUpdate{})
 	}
 
 	if err := quick.Check(f, quickCfg); err != nil {
@@ -602,17 +635,17 @@ func TestLocalFlagBits(t *testing.T) {
 		t.Error("file should have no weird bits set by default")
 	}
 
-	f.SetIgnored(42)
+	f.SetIgnored()
 	if !f.IsIgnored() || f.MustRescan() || !f.IsInvalid() {
 		t.Error("file should be ignored and invalid")
 	}
 
-	f.SetMustRescan(42)
+	f.SetMustRescan()
 	if f.IsIgnored() || !f.MustRescan() || !f.IsInvalid() {
 		t.Error("file should be must-rescan and invalid")
 	}
 
-	f.SetUnsupported(42)
+	f.SetUnsupported()
 	if f.IsIgnored() || f.MustRescan() || !f.IsInvalid() {
 		t.Error("file should be invalid")
 	}
@@ -831,8 +864,10 @@ func TestSha256OfEmptyBlock(t *testing.T) {
 func TestClusterConfigAfterClose(t *testing.T) {
 	m := newTestModel()
 
-	c := NewConnection(c0ID, &testutils.BlockingRW{}, &testutils.BlockingRW{}, m, "name", CompressAlways).(wireFormatConnection).Connection.(*rawConnection)
+	rw := testutils.NewBlockingRW()
+	c := getRawConnection(NewConnection(c0ID, rw, rw, testutils.NoopCloser{}, m, new(mockedConnectionInfo), CompressionAlways, nil))
 	c.Start()
+	defer closeAndWait(c, rw)
 
 	c.internalClose(errManual)
 
@@ -853,11 +888,13 @@ func TestDispatcherToCloseDeadlock(t *testing.T) {
 	// Verify that we don't deadlock when calling Close() from within one of
 	// the model callbacks (ClusterConfig).
 	m := newTestModel()
-	c := NewConnection(c0ID, &testutils.BlockingRW{}, &testutils.NoopRW{}, m, "name", CompressAlways).(wireFormatConnection).Connection.(*rawConnection)
+	rw := testutils.NewBlockingRW()
+	c := getRawConnection(NewConnection(c0ID, rw, &testutils.NoopRW{}, testutils.NoopCloser{}, m, new(mockedConnectionInfo), CompressionAlways, nil))
 	m.ccFn = func(devID DeviceID, cc ClusterConfig) {
 		c.Close(errManual)
 	}
 	c.Start()
+	defer closeAndWait(c, rw)
 
 	c.inbox <- &ClusterConfig{}
 
@@ -923,4 +960,30 @@ func TestIndexIDString(t *testing.T) {
 	if i.String() != "0x000000000000002A" {
 		t.Error(i.String())
 	}
+}
+
+func closeAndWait(c interface{}, closers ...io.Closer) {
+	for _, closer := range closers {
+		closer.Close()
+	}
+	var raw *rawConnection
+	switch i := c.(type) {
+	case *rawConnection:
+		raw = i
+	default:
+		raw = getRawConnection(c.(Connection))
+	}
+	raw.internalClose(ErrClosed)
+	raw.loopWG.Wait()
+}
+
+func getRawConnection(c Connection) *rawConnection {
+	var raw *rawConnection
+	switch i := c.(type) {
+	case wireFormatConnection:
+		raw = i.Connection.(encryptedConnection).conn
+	case encryptedConnection:
+		raw = i.conn
+	}
+	return raw
 }

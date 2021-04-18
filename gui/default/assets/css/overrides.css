@@ -21,7 +21,7 @@ ul+h5 {
     margin-top: 1.5em;
 }
 
-#content {
+.content {
     margin-bottom: 50px;
 }
 
@@ -39,6 +39,12 @@ ul+h5 {
 
 .checkbox input[type="checkbox"], .radio input[type="radio"] {
     float: none; /* issue #1197 */
+}
+
+#advancedAccordion input.form-control[type="checkbox"] {
+    box-shadow: none;
+    margin: 0;
+    width: auto;
 }
 
 .popover {
@@ -114,7 +120,8 @@ table.table-dynamic {
     word-break: break-all;
 }
 
-table.table-condensed td {
+table.table-condensed td,
+table.table-condensed th {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -357,7 +364,8 @@ ul.three-columns li, ul.two-columns li {
         overflow-y: scroll;
     }
 
-    table.table-condensed td {
+    table.table-condensed td,
+    table.table-condensed th {
         /* for mobile phones to allow linebreaks in long repro folder/shared with
         * columns. */
         white-space: normal;
@@ -420,4 +428,18 @@ ul.three-columns li, ul.two-columns li {
     .btn:not(.panel-heading) + .btn:not(.panel-heading) {
         margin-bottom: 1rem;
     }
+}
+
+.form-horizontal .form-group {
+    margin-bottom: 5px;
+}
+
+.form-horizontal {
+    margin-bottom: 10px;
+}
+
+/* Use the same style as Bootstrap uses for disabled <select>. */
+.form-control option[disabled] {
+    background-color: #eeeeee;
+    opacity: 1;
 }

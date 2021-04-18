@@ -8,9 +8,11 @@ package config
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -37,51 +39,93 @@ func init() {
 }
 
 func TestDefaultValues(t *testing.T) {
-	expected := OptionsConfiguration{
-		RawListenAddresses:      []string{"default"},
-		RawGlobalAnnServers:     []string{"default"},
-		GlobalAnnEnabled:        true,
-		LocalAnnEnabled:         true,
-		LocalAnnPort:            21027,
-		LocalAnnMCAddr:          "[ff12::8384]:21027",
-		MaxSendKbps:             0,
-		MaxRecvKbps:             0,
-		ReconnectIntervalS:      60,
-		RelaysEnabled:           true,
-		RelayReconnectIntervalM: 10,
-		StartBrowser:            true,
-		NATEnabled:              true,
-		NATLeaseM:               60,
-		NATRenewalM:             30,
-		NATTimeoutS:             10,
-		RestartOnWakeup:         true,
-		AutoUpgradeIntervalH:    12,
-		KeepTemporariesH:        24,
-		CacheIgnoredFiles:       false,
-		ProgressUpdateIntervalS: 5,
-		LimitBandwidthInLan:     false,
-		MinHomeDiskFree:         Size{1, "%"},
-		URURL:                   "https://data.syncthing.net/newdata",
-		URInitialDelayS:         1800,
-		URPostInsecurely:        false,
-		ReleasesURL:             "https://upgrades.syncthing.net/meta.json",
-		AlwaysLocalNets:         []string{},
-		OverwriteRemoteDevNames: false,
-		TempIndexMinBlocks:      10,
-		UnackedNotificationIDs:  []string{"authenticationUserAndPassword"},
-		DefaultFolderPath:       "~",
-		SetLowPriority:          true,
-		CRURL:                   "https://crash.syncthing.net/newcrash",
-		CREnabled:               true,
-		StunKeepaliveStartS:     180,
-		StunKeepaliveMinS:       20,
-		RawStunServers:          []string{"default"},
-		AnnounceLANAddresses:    true,
+	size, err := ParseSize("1%")
+	if err != nil {
+		t.Fatal(err)
 	}
+	expected := Configuration{
+		Version: CurrentVersion,
+		Folders: []FolderConfiguration{},
+		Options: OptionsConfiguration{
+			RawListenAddresses:      []string{"default"},
+			RawGlobalAnnServers:     []string{"default"},
+			GlobalAnnEnabled:        true,
+			LocalAnnEnabled:         true,
+			LocalAnnPort:            21027,
+			LocalAnnMCAddr:          "[ff12::8384]:21027",
+			MaxSendKbps:             0,
+			MaxRecvKbps:             0,
+			ReconnectIntervalS:      60,
+			RelaysEnabled:           true,
+			RelayReconnectIntervalM: 10,
+			StartBrowser:            true,
+			NATEnabled:              true,
+			NATLeaseM:               60,
+			NATRenewalM:             30,
+			NATTimeoutS:             10,
+			RestartOnWakeup:         true,
+			AutoUpgradeIntervalH:    12,
+			KeepTemporariesH:        24,
+			CacheIgnoredFiles:       false,
+			ProgressUpdateIntervalS: 5,
+			LimitBandwidthInLan:     false,
+			MinHomeDiskFree:         Size{1, "%"},
+			URURL:                   "https://data.syncthing.net/newdata",
+			URInitialDelayS:         1800,
+			URPostInsecurely:        false,
+			ReleasesURL:             "https://upgrades.syncthing.net/meta.json",
+			AlwaysLocalNets:         []string{},
+			OverwriteRemoteDevNames: false,
+			TempIndexMinBlocks:      10,
+			UnackedNotificationIDs:  []string{"authenticationUserAndPassword"},
+			SetLowPriority:          true,
+			CRURL:                   "https://crash.syncthing.net/newcrash",
+			CREnabled:               true,
+			StunKeepaliveStartS:     180,
+			StunKeepaliveMinS:       20,
+			RawStunServers:          []string{"default"},
+			AnnounceLANAddresses:    true,
+			FeatureFlags:            []string{},
+		},
+		Defaults: Defaults{
+			Folder: FolderConfiguration{
+				FilesystemType:   fs.FilesystemTypeBasic,
+				Path:             "~",
+				Type:             FolderTypeSendReceive,
+				Devices:          []FolderDeviceConfiguration{{DeviceID: device1}},
+				RescanIntervalS:  3600,
+				FSWatcherEnabled: true,
+				FSWatcherDelayS:  10,
+				IgnorePerms:      false,
+				AutoNormalize:    true,
+				MinDiskFree:      size,
+				Versioning: VersioningConfiguration{
+					CleanupIntervalS: 3600,
+					Params:           map[string]string{},
+				},
+				MaxConflicts:         10,
+				WeakHashThresholdPct: 25,
+				MarkerName:           ".stfolder",
+				MaxConcurrentWrites:  2,
+			},
+			Device: DeviceConfiguration{
+				Addresses:       []string{"dynamic"},
+				AllowedNetworks: []string{},
+				Compression:     protocol.CompressionMetadata,
+				IgnoredFolders:  []ObservedFolder{},
+			},
+		},
+		IgnoredDevices: []ObservedDevice{},
+	}
+	expected.Devices = []DeviceConfiguration{expected.Defaults.Device.Copy()}
+	expected.Devices[0].DeviceID = device1
+	expected.Devices[0].Name, _ = os.Hostname()
 
 	cfg := New(device1)
+	cfg.GUI = GUIConfiguration{}
+	cfg.LDAP = LDAPConfiguration{}
 
-	if diff, equal := messagediff.PrettyDiff(expected, cfg.Options); !equal {
+	if diff, equal := messagediff.PrettyDiff(expected, cfg); !equal {
 		t.Errorf("Default config differs. Diff:\n%s", diff)
 	}
 }
@@ -94,7 +138,8 @@ func TestDeviceConfig(t *testing.T) {
 		}
 
 		os.RemoveAll(filepath.Join("testdata", DefaultMarkerName))
-		wr, err := load(cfgFile, device1)
+		wr, wrCancel, err := copyAndLoad(cfgFile, device1)
+		defer wrCancel()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -106,7 +151,7 @@ func TestDeviceConfig(t *testing.T) {
 			t.Fatal("Unexpected file")
 		}
 
-		cfg := wr.(*wrapper).cfg
+		cfg := wr.Wrapper.(*wrapper).cfg
 
 		expectedFolders := []FolderConfiguration{
 			{
@@ -129,6 +174,7 @@ func TestDeviceConfig(t *testing.T) {
 				WeakHashThresholdPct: 25,
 				MarkerName:           DefaultMarkerName,
 				JunctionsAsDirs:      true,
+				MaxConcurrentWrites:  maxConcurrentWritesDefault,
 			},
 		}
 
@@ -137,19 +183,17 @@ func TestDeviceConfig(t *testing.T) {
 				DeviceID:        device1,
 				Name:            "node one",
 				Addresses:       []string{"tcp://a"},
-				Compression:     protocol.CompressMetadata,
+				Compression:     protocol.CompressionMetadata,
 				AllowedNetworks: []string{},
 				IgnoredFolders:  []ObservedFolder{},
-				PendingFolders:  []ObservedFolder{},
 			},
 			{
 				DeviceID:        device4,
 				Name:            "node two",
 				Addresses:       []string{"tcp://b"},
-				Compression:     protocol.CompressMetadata,
+				Compression:     protocol.CompressionMetadata,
 				AllowedNetworks: []string{},
 				IgnoredFolders:  []ObservedFolder{},
-				PendingFolders:  []ObservedFolder{},
 			},
 		}
 		expectedDeviceIDs := []protocol.DeviceID{device1, device4}
@@ -170,7 +214,8 @@ func TestDeviceConfig(t *testing.T) {
 }
 
 func TestNoListenAddresses(t *testing.T) {
-	cfg, err := load("testdata/nolistenaddress.xml", device1)
+	cfg, cfgCancel, err := copyAndLoad("testdata/nolistenaddress.xml", device1)
+	defer cfgCancel()
 	if err != nil {
 		t.Error(err)
 	}
@@ -217,23 +262,29 @@ func TestOverriddenValues(t *testing.T) {
 		OverwriteRemoteDevNames: true,
 		TempIndexMinBlocks:      100,
 		UnackedNotificationIDs:  []string{"asdfasdf"},
-		DefaultFolderPath:       "/media/syncthing",
 		SetLowPriority:          false,
 		CRURL:                   "https://localhost/newcrash",
 		CREnabled:               false,
 		StunKeepaliveStartS:     9000,
 		StunKeepaliveMinS:       900,
 		RawStunServers:          []string{"foo"},
+		FeatureFlags:            []string{"feature"},
 	}
+	expectedPath := "/media/syncthing"
 
 	os.Unsetenv("STNOUPGRADE")
-	cfg, err := load("testdata/overridenvalues.xml", device1)
+	cfg, cfgCancel, err := copyAndLoad("testdata/overridenvalues.xml", device1)
+	defer cfgCancel()
 	if err != nil {
 		t.Error(err)
 	}
 
 	if diff, equal := messagediff.PrettyDiff(expected, cfg.Options()); !equal {
 		t.Errorf("Overridden config differs. Diff:\n%s", diff)
+	}
+
+	if path := cfg.DefaultFolder().Path; path != expectedPath {
+		t.Errorf("Default folder path is %v, expected %v", path, expectedPath)
 	}
 }
 
@@ -245,34 +296,31 @@ func TestDeviceAddressesDynamic(t *testing.T) {
 			Addresses:       []string{"dynamic"},
 			AllowedNetworks: []string{},
 			IgnoredFolders:  []ObservedFolder{},
-			PendingFolders:  []ObservedFolder{},
 		},
 		device2: {
 			DeviceID:        device2,
 			Addresses:       []string{"dynamic"},
 			AllowedNetworks: []string{},
 			IgnoredFolders:  []ObservedFolder{},
-			PendingFolders:  []ObservedFolder{},
 		},
 		device3: {
 			DeviceID:        device3,
 			Addresses:       []string{"dynamic"},
 			AllowedNetworks: []string{},
 			IgnoredFolders:  []ObservedFolder{},
-			PendingFolders:  []ObservedFolder{},
 		},
 		device4: {
 			DeviceID:        device4,
 			Name:            name, // Set when auto created
 			Addresses:       []string{"dynamic"},
-			Compression:     protocol.CompressMetadata,
+			Compression:     protocol.CompressionMetadata,
 			AllowedNetworks: []string{},
 			IgnoredFolders:  []ObservedFolder{},
-			PendingFolders:  []ObservedFolder{},
 		},
 	}
 
-	cfg, err := load("testdata/deviceaddressesdynamic.xml", device4)
+	cfg, cfgCancel, err := copyAndLoad("testdata/deviceaddressesdynamic.xml", device4)
+	defer cfgCancel()
 	if err != nil {
 		t.Error(err)
 	}
@@ -289,39 +337,36 @@ func TestDeviceCompression(t *testing.T) {
 		device1: {
 			DeviceID:        device1,
 			Addresses:       []string{"dynamic"},
-			Compression:     protocol.CompressMetadata,
+			Compression:     protocol.CompressionMetadata,
 			AllowedNetworks: []string{},
 			IgnoredFolders:  []ObservedFolder{},
-			PendingFolders:  []ObservedFolder{},
 		},
 		device2: {
 			DeviceID:        device2,
 			Addresses:       []string{"dynamic"},
-			Compression:     protocol.CompressMetadata,
+			Compression:     protocol.CompressionMetadata,
 			AllowedNetworks: []string{},
 			IgnoredFolders:  []ObservedFolder{},
-			PendingFolders:  []ObservedFolder{},
 		},
 		device3: {
 			DeviceID:        device3,
 			Addresses:       []string{"dynamic"},
-			Compression:     protocol.CompressNever,
+			Compression:     protocol.CompressionNever,
 			AllowedNetworks: []string{},
 			IgnoredFolders:  []ObservedFolder{},
-			PendingFolders:  []ObservedFolder{},
 		},
 		device4: {
 			DeviceID:        device4,
 			Name:            name, // Set when auto created
 			Addresses:       []string{"dynamic"},
-			Compression:     protocol.CompressMetadata,
+			Compression:     protocol.CompressionMetadata,
 			AllowedNetworks: []string{},
 			IgnoredFolders:  []ObservedFolder{},
-			PendingFolders:  []ObservedFolder{},
 		},
 	}
 
-	cfg, err := load("testdata/devicecompression.xml", device4)
+	cfg, cfgCancel, err := copyAndLoad("testdata/devicecompression.xml", device4)
+	defer cfgCancel()
 	if err != nil {
 		t.Error(err)
 	}
@@ -340,34 +385,31 @@ func TestDeviceAddressesStatic(t *testing.T) {
 			Addresses:       []string{"tcp://192.0.2.1", "tcp://192.0.2.2"},
 			AllowedNetworks: []string{},
 			IgnoredFolders:  []ObservedFolder{},
-			PendingFolders:  []ObservedFolder{},
 		},
 		device2: {
 			DeviceID:        device2,
 			Addresses:       []string{"tcp://192.0.2.3:6070", "tcp://[2001:db8::42]:4242"},
 			AllowedNetworks: []string{},
 			IgnoredFolders:  []ObservedFolder{},
-			PendingFolders:  []ObservedFolder{},
 		},
 		device3: {
 			DeviceID:        device3,
 			Addresses:       []string{"tcp://[2001:db8::44]:4444", "tcp://192.0.2.4:6090"},
 			AllowedNetworks: []string{},
 			IgnoredFolders:  []ObservedFolder{},
-			PendingFolders:  []ObservedFolder{},
 		},
 		device4: {
 			DeviceID:        device4,
 			Name:            name, // Set when auto created
 			Addresses:       []string{"dynamic"},
-			Compression:     protocol.CompressMetadata,
+			Compression:     protocol.CompressionMetadata,
 			AllowedNetworks: []string{},
 			IgnoredFolders:  []ObservedFolder{},
-			PendingFolders:  []ObservedFolder{},
 		},
 	}
 
-	cfg, err := load("testdata/deviceaddressesstatic.xml", device4)
+	cfg, cfgCancel, err := copyAndLoad("testdata/deviceaddressesstatic.xml", device4)
+	defer cfgCancel()
 	if err != nil {
 		t.Error(err)
 	}
@@ -379,7 +421,8 @@ func TestDeviceAddressesStatic(t *testing.T) {
 }
 
 func TestVersioningConfig(t *testing.T) {
-	cfg, err := load("testdata/versioningconfig.xml", device4)
+	cfg, cfgCancel, err := copyAndLoad("testdata/versioningconfig.xml", device4)
+	defer cfgCancel()
 	if err != nil {
 		t.Error(err)
 	}
@@ -406,7 +449,8 @@ func TestIssue1262(t *testing.T) {
 		t.Skipf("path gets converted to absolute as part of the filesystem initialization on linux")
 	}
 
-	cfg, err := load("testdata/issue-1262.xml", device4)
+	cfg, cfgCancel, err := copyAndLoad("testdata/issue-1262.xml", device4)
+	defer cfgCancel()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -420,7 +464,8 @@ func TestIssue1262(t *testing.T) {
 }
 
 func TestIssue1750(t *testing.T) {
-	cfg, err := load("testdata/issue-1750.xml", device4)
+	cfg, cfgCancel, err := copyAndLoad("testdata/issue-1750.xml", device4)
+	defer cfgCancel()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -508,7 +553,7 @@ func TestFolderCheckPath(t *testing.T) {
 		}
 
 		if err := cfg.CheckPath(); testcase.err != err {
-			t.Errorf("unexpected error in case %s: %s != %s", testcase.path, err, testcase.err)
+			t.Errorf("unexpected error in case %s: %s != %v", testcase.path, err, testcase.err)
 		}
 	}
 }
@@ -516,6 +561,7 @@ func TestFolderCheckPath(t *testing.T) {
 func TestNewSaveLoad(t *testing.T) {
 	path := "testdata/temp.xml"
 	os.Remove(path)
+	defer os.Remove(path)
 
 	exists := func(path string) bool {
 		_, err := os.Stat(path)
@@ -523,7 +569,8 @@ func TestNewSaveLoad(t *testing.T) {
 	}
 
 	intCfg := New(device1)
-	cfg := wrap(path, intCfg)
+	cfg := wrap(path, intCfg, device1)
+	defer cfg.stop()
 
 	if exists(path) {
 		t.Error(path, "exists")
@@ -538,6 +585,7 @@ func TestNewSaveLoad(t *testing.T) {
 	}
 
 	cfg2, err := load(path, device1)
+	defer cfg2.stop()
 	if err != nil {
 		t.Error(err)
 	}
@@ -545,8 +593,6 @@ func TestNewSaveLoad(t *testing.T) {
 	if diff, equal := messagediff.PrettyDiff(cfg.RawCopy(), cfg2.RawCopy()); !equal {
 		t.Errorf("Configs are not equal. Diff:\n%s", diff)
 	}
-
-	os.Remove(path)
 }
 
 func TestPrepare(t *testing.T) {
@@ -564,7 +610,8 @@ func TestPrepare(t *testing.T) {
 }
 
 func TestCopy(t *testing.T) {
-	wrapper, err := load("testdata/example.xml", device1)
+	wrapper, wrapperCancel, err := copyAndLoad("testdata/example.xml", device1)
+	defer wrapperCancel()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -603,7 +650,8 @@ func TestCopy(t *testing.T) {
 }
 
 func TestPullOrder(t *testing.T) {
-	wrapper, err := load("testdata/pullorder.xml", device1)
+	wrapper, wrapperCleanup, err := copyAndLoad("testdata/pullorder.xml", device1)
+	defer wrapperCleanup()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -643,8 +691,9 @@ func TestPullOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrapper = wrap("testdata/pullorder.xml", cfg)
-	folders = wrapper.Folders()
+	wrapper2 := wrap(wrapper.ConfigPath(), cfg, device1)
+	defer wrapper2.stop()
+	folders = wrapper2.Folders()
 
 	for _, tc := range expected {
 		if actual := folders[tc.name].Order; actual != tc.order {
@@ -654,7 +703,8 @@ func TestPullOrder(t *testing.T) {
 }
 
 func TestLargeRescanInterval(t *testing.T) {
-	wrapper, err := load("testdata/largeinterval.xml", device1)
+	wrapper, wrapperCancel, err := copyAndLoad("testdata/largeinterval.xml", device1)
+	defer wrapperCancel()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -692,7 +742,8 @@ func TestGUIConfigURL(t *testing.T) {
 func TestDuplicateDevices(t *testing.T) {
 	// Duplicate devices should be removed
 
-	wrapper, err := load("testdata/dupdevices.xml", device1)
+	wrapper, wrapperCancel, err := copyAndLoad("testdata/dupdevices.xml", device1)
+	defer wrapperCancel()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -710,7 +761,8 @@ func TestDuplicateDevices(t *testing.T) {
 func TestDuplicateFolders(t *testing.T) {
 	// Duplicate folders are a loading error
 
-	_, err := load("testdata/dupfolders.xml", device1)
+	_, _Cancel, err := copyAndLoad("testdata/dupfolders.xml", device1)
+	defer _Cancel()
 	if err == nil || !strings.Contains(err.Error(), errFolderIDDuplicate.Error()) {
 		t.Fatal(`Expected error to mention "duplicate folder ID":`, err)
 	}
@@ -721,7 +773,8 @@ func TestEmptyFolderPaths(t *testing.T) {
 	// get messed up by the prepare steps (e.g., become the current dir or
 	// get a slash added so that it becomes the root directory or similar).
 
-	_, err := load("testdata/nopath.xml", device1)
+	_, _Cancel, err := copyAndLoad("testdata/nopath.xml", device1)
+	defer _Cancel()
 	if err == nil || !strings.Contains(err.Error(), errFolderPathEmpty.Error()) {
 		t.Fatal("Expected error due to empty folder path, got", err)
 	}
@@ -790,7 +843,8 @@ func TestIgnoredDevices(t *testing.T) {
 	// Verify that ignored devices that are also present in the
 	// configuration are not in fact ignored.
 
-	wrapper, err := load("testdata/ignoreddevices.xml", device1)
+	wrapper, wrapperCancel, err := copyAndLoad("testdata/ignoreddevices.xml", device1)
+	defer wrapperCancel()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -808,7 +862,8 @@ func TestIgnoredFolders(t *testing.T) {
 	// configuration are not in fact ignored.
 	// Also, verify that folders that are shared with a device are not ignored.
 
-	wrapper, err := load("testdata/ignoredfolders.xml", device1)
+	wrapper, wrapperCancel, err := copyAndLoad("testdata/ignoredfolders.xml", device1)
+	defer wrapperCancel()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -844,7 +899,8 @@ func TestIgnoredFolders(t *testing.T) {
 func TestGetDevice(t *testing.T) {
 	// Verify that the Device() call does the right thing
 
-	wrapper, err := load("testdata/ignoreddevices.xml", device1)
+	wrapper, wrapperCancel, err := copyAndLoad("testdata/ignoreddevices.xml", device1)
+	defer wrapperCancel()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -871,7 +927,8 @@ func TestGetDevice(t *testing.T) {
 }
 
 func TestSharesRemovedOnDeviceRemoval(t *testing.T) {
-	wrapper, err := load("testdata/example.xml", device1)
+	wrapper, wrapperCancel, err := copyAndLoad("testdata/example.xml", device1)
+	defer wrapperCancel()
 	if err != nil {
 		t.Errorf("Failed: %s", err)
 	}
@@ -883,10 +940,7 @@ func TestSharesRemovedOnDeviceRemoval(t *testing.T) {
 		t.Error("Should have less devices")
 	}
 
-	_, err = wrapper.Replace(raw)
-	if err != nil {
-		t.Errorf("Failed: %s", err)
-	}
+	replace(t, wrapper, raw)
 
 	raw = wrapper.RawCopy()
 	if len(raw.Folders[0].Devices) > len(raw.Devices) {
@@ -938,7 +992,8 @@ func TestIssue4219(t *testing.T) {
 		]
 	}`))
 
-	cfg, err := ReadJSON(r, protocol.LocalDeviceID)
+	myID := protocol.LocalDeviceID
+	cfg, err := ReadJSON(r, myID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -956,7 +1011,8 @@ func TestIssue4219(t *testing.T) {
 		t.Errorf("There should be three ignored folders, not %d", ignoredFolders)
 	}
 
-	w := wrap("/tmp/cfg", cfg)
+	w := wrap("/tmp/cfg", cfg, myID)
+	defer w.stop()
 	if !w.IgnoredFolder(device2, "t1") {
 		t.Error("Folder device2 t1 should be ignored")
 	}
@@ -1093,10 +1149,6 @@ func TestDeviceConfigObservedNotNil(t *testing.T) {
 		if dev.IgnoredFolders == nil {
 			t.Errorf("Ignored folders nil")
 		}
-
-		if dev.PendingFolders == nil {
-			t.Errorf("Pending folders nil")
-		}
 	}
 }
 
@@ -1116,12 +1168,16 @@ func TestRemoveDeviceWithEmptyID(t *testing.T) {
 		},
 	}
 
-	cfg.clean()
+	cfg.prepare(device1)
 
-	if len(cfg.Devices) != 0 {
+	if len(cfg.Devices) != 1 {
+		t.Error("Expected one device")
+	} else if cfg.Devices[0].DeviceID != device1 {
 		t.Error("Expected device with empty ID to be removed from config:", cfg.Devices)
 	}
-	if len(cfg.Folders[0].Devices) != 0 {
+	if len(cfg.Folders[0].Devices) != 1 {
+		t.Error("Expected one device in folder")
+	} else if cfg.Folders[0].Devices[0].DeviceID != device1 {
 		t.Error("Expected device with empty ID to be removed from folder")
 	}
 }
@@ -1147,13 +1203,29 @@ func TestMaxConcurrentFolders(t *testing.T) {
 	}
 }
 
+func adjustDeviceConfiguration(cfg *DeviceConfiguration, id protocol.DeviceID, name string) {
+	cfg.DeviceID = id
+	cfg.Name = name
+}
+
+func adjustFolderConfiguration(cfg *FolderConfiguration, id, label string, fsType fs.FilesystemType, path string) {
+	cfg.ID = id
+	cfg.Label = label
+	cfg.FilesystemType = fsType
+	cfg.Path = path
+}
+
 // defaultConfigAsMap returns a valid default config as a JSON-decoded
 // map[string]interface{}. This is useful to override random elements and
 // re-encode into JSON.
 func defaultConfigAsMap() map[string]interface{} {
 	cfg := New(device1)
-	cfg.Devices = append(cfg.Devices, NewDeviceConfiguration(device2, "name"))
-	cfg.Folders = append(cfg.Folders, NewFolderConfiguration(device1, "default", "default", fs.FilesystemTypeBasic, "/tmp"))
+	dev := cfg.Defaults.Device.Copy()
+	adjustDeviceConfiguration(&dev, device2, "name")
+	cfg.Devices = append(cfg.Devices, dev)
+	folder := cfg.Defaults.Folder.Copy()
+	adjustFolderConfiguration(&folder, "default", "default", fs.FilesystemTypeBasic, "/tmp")
+	cfg.Folders = append(cfg.Folders, folder)
 	bs, err := json.Marshal(cfg)
 	if err != nil {
 		// can't happen
@@ -1167,13 +1239,74 @@ func defaultConfigAsMap() map[string]interface{} {
 	return tmp
 }
 
-func load(path string, myID protocol.DeviceID) (Wrapper, error) {
-	cfg, _, err := Load(path, myID, events.NoopLogger)
-	return cfg, err
+func copyToTmp(path string) (string, error) {
+	orig, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer orig.Close()
+	temp, err := ioutil.TempFile("", "syncthing-configTest-")
+	if err != nil {
+		return "", err
+	}
+	defer temp.Close()
+	if _, err := io.Copy(temp, orig); err != nil {
+		return "", err
+	}
+	return temp.Name(), nil
 }
 
-func wrap(path string, cfg Configuration) Wrapper {
-	return Wrap(path, cfg, events.NoopLogger)
+func copyAndLoad(path string, myID protocol.DeviceID) (*testWrapper, func(), error) {
+	temp, err := copyToTmp(path)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	wrapper, err := load(temp, myID)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	return wrapper, func() {
+		wrapper.stop()
+		os.Remove(temp)
+	}, nil
+}
+
+func load(path string, myID protocol.DeviceID) (*testWrapper, error) {
+	cfg, _, err := Load(path, myID, events.NoopLogger)
+	if err != nil {
+		return nil, err
+	}
+	return startWrapper(cfg), nil
+}
+
+func wrap(path string, cfg Configuration, myID protocol.DeviceID) *testWrapper {
+	wrapper := Wrap(path, cfg, myID, events.NoopLogger)
+	return startWrapper(wrapper)
+}
+
+type testWrapper struct {
+	Wrapper
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+func (w *testWrapper) stop() {
+	w.cancel()
+	<-w.done
+}
+
+func startWrapper(wrapper Wrapper) *testWrapper {
+	tw := &testWrapper{
+		Wrapper: wrapper,
+		done:    make(chan struct{}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	tw.cancel = cancel
+	go func() {
+		wrapper.Serve(ctx)
+		close(tw.done)
+	}()
+	return tw
 }
 
 func TestInternalVersioningConfiguration(t *testing.T) {
@@ -1181,7 +1314,9 @@ func TestInternalVersioningConfiguration(t *testing.T) {
 	// reasonable.
 
 	cfg := New(device1)
-	cfg.Folders = append(cfg.Folders, NewFolderConfiguration(device1, "default", "default", fs.FilesystemTypeBasic, "/tmp"))
+	folder := cfg.Defaults.Folder.Copy()
+	adjustFolderConfiguration(&folder, "default", "default", fs.FilesystemTypeBasic, "/tmp")
+	cfg.Folders = append(cfg.Folders, folder)
 	cfg.Folders[0].Versioning = VersioningConfiguration{
 		Type:             "foo",
 		Params:           map[string]string{"bar": "baz"},

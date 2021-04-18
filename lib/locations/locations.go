@@ -34,6 +34,7 @@ const (
 	AuditLog      LocationEnum = "auditLog"
 	GUIAssets     LocationEnum = "GUIAssets"
 	DefFolder     LocationEnum = "defFolder"
+	FailuresFile  LocationEnum = "FailuresFile"
 )
 
 type BaseDirEnum string
@@ -46,18 +47,13 @@ const (
 	UserHomeBaseDir BaseDirEnum = "userHome"
 
 	LevelDBDir = "index-v0.14.0.db"
-	BadgerDir  = "indexdb.badger"
+	BoltDir    = "badger.db"
 )
 
 // Platform dependent directories
 var baseDirs = make(map[BaseDirEnum]string, 3)
 
 func init() {
-	if os.Getenv("USE_BADGER") != "" {
-		// XXX: Replace the leveldb name with the badger name.
-		locationTemplates[Database] = strings.Replace(locationTemplates[Database], LevelDBDir, BadgerDir, 1)
-	}
-
 	userHome := userHomeDir()
 	config := defaultConfigDir(userHome)
 	baseDirs[UserHomeBaseDir] = userHome
@@ -72,6 +68,13 @@ func init() {
 }
 
 func SetBaseDir(baseDirName BaseDirEnum, path string) error {
+	if !filepath.IsAbs(path) {
+		var err error
+		path, err = filepath.Abs(path)
+		if err != nil {
+			return err
+		}
+	}
 	_, ok := baseDirs[baseDirName]
 	if !ok {
 		return fmt.Errorf("unknown base dir: %s", baseDirName)
@@ -102,6 +105,7 @@ var locationTemplates = map[LocationEnum]string{
 	AuditLog:      "${data}/audit-${timestamp}.log",
 	GUIAssets:     "${config}/gui",
 	DefFolder:     "${userHome}/Sync",
+	FailuresFile:  "${data}/failures-unreported.txt",
 }
 
 var locations = make(map[LocationEnum]string)
@@ -112,7 +116,7 @@ func expandLocations() error {
 	newLocations := make(map[LocationEnum]string)
 	for key, dir := range locationTemplates {
 		for varName, value := range baseDirs {
-			dir = strings.Replace(dir, "${"+string(varName)+"}", value, -1)
+			dir = strings.ReplaceAll(dir, "${"+string(varName)+"}", value)
 		}
 		var err error
 		dir, err = fs.ExpandTilde(dir)
@@ -156,14 +160,7 @@ func defaultDataDir(userHome, config string) string {
 
 	default:
 		// If a database exists at the "normal" location, use that anyway.
-		// We look for both LevelDB and Badger variants here regardless of
-		// what we're currently configured to use, because we might be
-		// starting up in Badger mode with only a LevelDB database present
-		// (will be converted), or vice versa.
 		if _, err := os.Lstat(filepath.Join(config, LevelDBDir)); err == nil {
-			return config
-		}
-		if _, err := os.Lstat(filepath.Join(config, BadgerDir)); err == nil {
 			return config
 		}
 		// Always use this env var, as it's explicitly set by the user
@@ -201,5 +198,5 @@ func GetTimestamped(key LocationEnum) string {
 	// 2006 replaced by 2015...
 	tpl := locations[key]
 	now := time.Now().Format("20060102-150405")
-	return strings.Replace(tpl, "${timestamp}", now, -1)
+	return strings.ReplaceAll(tpl, "${timestamp}", now)
 }

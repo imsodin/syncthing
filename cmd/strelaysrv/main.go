@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"fmt"
@@ -98,7 +99,7 @@ func main() {
 	flag.IntVar(&natRenewal, "nat-renewal", 30, "NAT renewal frequency in minutes")
 	flag.IntVar(&natTimeout, "nat-timeout", 10, "NAT discovery timeout in seconds")
 	flag.BoolVar(&pprofEnabled, "pprof", false, "Enable the built in profiling on the status server")
-	flag.IntVar(&networkBufferSize, "network-buffer", 2048, "Network buffer size (two of these per proxied connection)")
+	flag.IntVar(&networkBufferSize, "network-buffer", 65536, "Network buffer size (two of these per proxied connection)")
 	showVersion := flag.Bool("version", false, "Show version")
 	flag.Parse()
 
@@ -184,17 +185,20 @@ func main() {
 		log.Println("ID:", id)
 	}
 
-	wrapper := config.Wrap("config", config.New(id), events.NoopLogger)
-	wrapper.SetOptions(config.OptionsConfiguration{
-		NATLeaseM:   natLease,
-		NATRenewalM: natRenewal,
-		NATTimeoutS: natTimeout,
+	wrapper := config.Wrap("config", config.New(id), id, events.NoopLogger)
+	go wrapper.Serve(context.TODO())
+	wrapper.Modify(func(cfg *config.Configuration) {
+		cfg.Options.NATLeaseM = natLease
+		cfg.Options.NATRenewalM = natRenewal
+		cfg.Options.NATTimeoutS = natTimeout
 	})
 	natSvc := nat.NewService(id, wrapper)
 	mapping := mapping{natSvc.NewMapping(nat.TCP, addr.IP, addr.Port)}
 
 	if natEnabled {
-		go natSvc.Serve()
+		ctx, cancel := context.WithCancel(context.Background())
+		go natSvc.Serve(ctx)
+		defer cancel()
 		found := make(chan struct{})
 		mapping.OnChanged(func(_ *nat.Mapping, _, _ []nat.Address) {
 			select {
@@ -229,6 +233,7 @@ func main() {
 	uri, err := url.Parse(fmt.Sprintf("relay://%s/?id=%s&pingInterval=%s&networkTimeout=%s&sessionLimitBps=%d&globalLimitBps=%d&statusAddr=%s&providedBy=%s", mapping.Address(), id, pingInterval, networkTimeout, sessionLimitBps, globalLimitBps, statusAddr, providedBy))
 	if err != nil {
 		log.Fatalln("Failed to construct URI", err)
+		return
 	}
 
 	log.Println("URI:", uri.String())
@@ -244,7 +249,7 @@ func main() {
 	for _, pool := range pools {
 		pool = strings.TrimSpace(pool)
 		if len(pool) > 0 {
-			go poolHandler(pool, uri, mapping)
+			go poolHandler(pool, uri, mapping, cert)
 		}
 	}
 

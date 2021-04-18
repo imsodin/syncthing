@@ -9,10 +9,12 @@ package db
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"math/bits"
 	"time"
 
 	"github.com/syncthing/syncthing/lib/db/backend"
+	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/protocol"
 	"github.com/syncthing/syncthing/lib/sync"
 )
@@ -28,8 +30,9 @@ type countsMap struct {
 type metadataTracker struct {
 	keyer keyer
 	countsMap
-	mut   sync.RWMutex
-	dirty bool
+	mut      sync.RWMutex
+	dirty    bool
+	evLogger events.Logger
 }
 
 type metaKey struct {
@@ -39,13 +42,14 @@ type metaKey struct {
 
 const needFlag uint32 = 1 << 31 // Last bit, as early ones are local flags
 
-func newMetadataTracker(keyer keyer) *metadataTracker {
+func newMetadataTracker(keyer keyer, evLogger events.Logger) *metadataTracker {
 	return &metadataTracker{
 		keyer: keyer,
 		mut:   sync.NewRWMutex(),
 		countsMap: countsMap{
 			indexes: make(map[metaKey]int),
 		},
+		evLogger: evLogger,
 	}
 }
 
@@ -144,10 +148,9 @@ func (m *metadataTracker) countsPtr(dev protocol.DeviceID, flag uint32) *Counts 
 		// the metadatatracker, even if there's no change to the need
 		// bucket itself.
 		nkey := metaKey{dev, needFlag}
-		nidx, ok := m.indexes[nkey]
-		if !ok {
+		if _, ok := m.indexes[nkey]; !ok {
 			// Initially a new device needs everything, except deletes
-			nidx = len(m.counts.Counts)
+			nidx := len(m.counts.Counts)
 			m.counts.Counts = append(m.counts.Counts, m.allNeededCounts(dev))
 			m.indexes[nkey] = nidx
 		}
@@ -198,18 +201,24 @@ func (m *metadataTracker) updateFileLocked(dev protocol.DeviceID, f protocol.Fil
 	}
 }
 
-// emptyNeeded makes sure there is a zero counts in case the device needs nothing.
+// emptyNeeded ensures that there is a need count for the given device and that it is empty.
 func (m *metadataTracker) emptyNeeded(dev protocol.DeviceID) {
 	m.mut.Lock()
 	defer m.mut.Unlock()
 
 	m.dirty = true
 
-	m.indexes[metaKey{dev, needFlag}] = len(m.counts.Counts)
-	m.counts.Counts = append(m.counts.Counts, Counts{
+	empty := Counts{
 		DeviceID:   dev[:],
 		LocalFlags: needFlag,
-	})
+	}
+	key := metaKey{dev, needFlag}
+	if idx, ok := m.indexes[key]; ok {
+		m.counts.Counts[idx] = empty
+		return
+	}
+	m.indexes[key] = len(m.counts.Counts)
+	m.counts.Counts = append(m.counts.Counts, empty)
 }
 
 // addNeeded adds a file to the needed counts
@@ -290,18 +299,22 @@ func (m *metadataTracker) removeFileLocked(dev protocol.DeviceID, flag uint32, f
 	// the created timestamp to zero. Next time we start up the metadata
 	// will be seen as infinitely old and recalculated from scratch.
 	if cp.Deleted < 0 {
+		m.evLogger.Log(events.Failure, fmt.Sprintf("meta deleted count for flag 0x%x dropped below zero", flag))
 		cp.Deleted = 0
 		m.counts.Created = 0
 	}
 	if cp.Files < 0 {
+		m.evLogger.Log(events.Failure, fmt.Sprintf("meta files count for flag 0x%x dropped below zero", flag))
 		cp.Files = 0
 		m.counts.Created = 0
 	}
 	if cp.Directories < 0 {
+		m.evLogger.Log(events.Failure, fmt.Sprintf("meta directories count for flag 0x%x dropped below zero", flag))
 		cp.Directories = 0
 		m.counts.Created = 0
 	}
 	if cp.Symlinks < 0 {
+		m.evLogger.Log(events.Failure, fmt.Sprintf("meta deleted count for flag 0x%x dropped below zero", flag))
 		cp.Symlinks = 0
 		m.counts.Created = 0
 	}

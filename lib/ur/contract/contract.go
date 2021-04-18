@@ -129,7 +129,12 @@ type Report struct {
 		BlockPullOrder          map[string]int `json:"blockPullOrder,omitempty" since:"3"`
 		CopyRangeMethod         map[string]int `json:"copyRangeMethod,omitempty" since:"3"`
 		CaseSensitiveFS         int            `json:"caseSensitiveFS,omitempty" since:"3"`
+		ReceiveEncrypted        int            `json:"receiveencrypted,omitempty" since:"3"`
 	} `json:"folderUsesV3,omitempty" since:"3"`
+
+	DeviceUsesV3 struct {
+		Untrusted int `json:"untrusted,omitempty" since:"3"`
+	} `json:"deviceUsesV3,omitempty" since:"3"`
 
 	GUIStats struct {
 		Enabled                   int            `json:"enabled,omitempty" since:"3"`
@@ -289,9 +294,9 @@ func (r *Report) FieldNames() []string {
 		"FolderAutoNormalize",
 		"DeviceIntroducer",
 		"DeviceCustomCertName",
-		"DeviceCompressAlways",
-		"DeviceCompressMetadata",
-		"DeviceCompressNever",
+		"DeviceCompressionAlways",
+		"DeviceCompressionMetadata",
+		"DeviceCompressionNever",
 		"DeviceDynamicAddr",
 		"DeviceStaticAddr",
 		"AnnounceGlobalEnabled",

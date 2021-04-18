@@ -49,12 +49,17 @@ func DefaultConfig(path string, myID protocol.DeviceID, evLogger events.Logger, 
 
 	if noDefaultFolder {
 		l.Infoln("We will skip creation of a default folder on first start")
-		return config.Wrap(path, newCfg, evLogger), nil
+		return config.Wrap(path, newCfg, myID, evLogger), nil
 	}
 
-	newCfg.Folders = append(newCfg.Folders, config.NewFolderConfiguration(myID, "default", "Default Folder", fs.FilesystemTypeBasic, locations.Get(locations.DefFolder)))
+	fcfg := newCfg.Defaults.Folder.Copy()
+	fcfg.ID = "default"
+	fcfg.Label = "Default Folder"
+	fcfg.FilesystemType = fs.FilesystemTypeBasic
+	fcfg.Path = locations.Get(locations.DefFolder)
+	newCfg.Folders = append(newCfg.Folders, fcfg)
 	l.Infoln("Default folder created and/or linked to new config")
-	return config.Wrap(path, newCfg, evLogger), nil
+	return config.Wrap(path, newCfg, myID, evLogger), nil
 }
 
 // LoadConfigAtStartup loads an existing config. If it doesn't yet exist, it

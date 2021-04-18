@@ -33,12 +33,16 @@ func OpenBolt(path string) (Backend, error) {
 	if err != nil {
 		return nil, wrapBoltErr(err)
 	}
-	return &boltBackend{db: db}, nil
+	return &boltBackend{
+		db:       db,
+		location: path,
+	}, nil
 }
 
 type boltBackend struct {
-	db      *bolt.DB
-	closeWG *closeWaitGroup
+	db       *bolt.DB
+	location string
+	closeWG  *closeWaitGroup
 }
 
 func (b *boltBackend) NewReadTransaction() (ReadTransaction, error) {
@@ -115,6 +119,10 @@ func (b *boltBackend) Close() error {
 
 func (b *boltBackend) Compact() error {
 	return nil
+}
+
+func (b *boltBackend) Location() string {
+	return b.location
 }
 
 type boltReadTransaction struct {

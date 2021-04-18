@@ -36,7 +36,7 @@ func (t *TestModel) IndexUpdate(deviceID DeviceID, folder string, files []FileIn
 	return nil
 }
 
-func (t *TestModel) Request(deviceID DeviceID, folder, name string, size int32, offset int64, hash []byte, weakHash uint32, fromTemporary bool) (RequestResponse, error) {
+func (t *TestModel) Request(deviceID DeviceID, folder, name string, blockNo, size int32, offset int64, hash []byte, weakHash uint32, fromTemporary bool) (RequestResponse, error) {
 	t.folder = folder
 	t.name = name
 	t.offset = offset
@@ -49,7 +49,7 @@ func (t *TestModel) Request(deviceID DeviceID, folder, name string, size int32, 
 	return &fakeRequestResponse{buf}, nil
 }
 
-func (t *TestModel) Closed(conn Connection, err error) {
+func (t *TestModel) Closed(_ DeviceID, err error) {
 	t.closedErr = err
 	close(t.closedCh)
 }

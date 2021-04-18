@@ -4,7 +4,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at http://mozilla.org/MPL/2.0/.
 
-// +build go1.12,!noquic
+// +build go1.14,!noquic,!go1.17
 
 package connections
 
@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/lucas-clemente/quic-go"
@@ -24,7 +25,7 @@ import (
 	"github.com/syncthing/syncthing/lib/connections/registry"
 	"github.com/syncthing/syncthing/lib/nat"
 	"github.com/syncthing/syncthing/lib/stun"
-	"github.com/syncthing/syncthing/lib/util"
+	"github.com/syncthing/syncthing/lib/svcutil"
 )
 
 func init() {
@@ -35,7 +36,7 @@ func init() {
 }
 
 type quicListener struct {
-	util.ServiceWithError
+	svcutil.ServiceWithError
 	nat atomic.Value
 
 	onAddressesChangedNotifier
@@ -79,7 +80,7 @@ func (t *quicListener) OnExternalAddressChanged(address *stun.Host, via string) 
 }
 
 func (t *quicListener) serve(ctx context.Context) error {
-	network := strings.Replace(t.uri.Scheme, "quic", "udp", -1)
+	network := strings.ReplaceAll(t.uri.Scheme, "quic", "udp")
 
 	packetConn, err := net.ListenPacket(network, t.uri.Host)
 	if err != nil {
@@ -90,14 +91,17 @@ func (t *quicListener) serve(ctx context.Context) error {
 
 	svc, conn := stun.New(t.cfg, t, packetConn)
 	defer func() { _ = conn.Close() }()
+	wrapped := &stunConnQUICWrapper{
+		PacketConn: conn,
+		underlying: packetConn.(*net.UDPConn),
+	}
 
-	go svc.Serve()
-	defer svc.Stop()
+	go svc.Serve(ctx)
 
-	registry.Register(t.uri.Scheme, conn)
-	defer registry.Unregister(t.uri.Scheme, conn)
+	registry.Register(t.uri.Scheme, wrapped)
+	defer registry.Unregister(t.uri.Scheme, wrapped)
 
-	listener, err := quic.Listen(conn, t.tlsCfg, quicConfig)
+	listener, err := quic.Listen(wrapped, t.tlsCfg, quicConfig)
 	if err != nil {
 		l.Infoln("Listen (BEP/quic):", err)
 		return err
@@ -115,7 +119,7 @@ func (t *quicListener) serve(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return ctx.Err()
 		default:
 		}
 
@@ -151,7 +155,7 @@ func (t *quicListener) serve(ctx context.Context) error {
 			continue
 		}
 
-		t.conns <- internalConn{&quicTlsConn{session, stream, nil}, connTypeQUICServer, quicPriority}
+		t.conns <- newInternalConn(&quicTlsConn{session, stream, nil}, connTypeQUICServer, quicPriority)
 	}
 }
 
@@ -160,7 +164,7 @@ func (t *quicListener) URI() *url.URL {
 }
 
 func (t *quicListener) WANAddresses() []*url.URL {
-	uris := t.LANAddresses()
+	uris := []*url.URL{t.uri}
 	t.mut.Lock()
 	if t.address != nil {
 		uris = append(uris, t.address)
@@ -171,7 +175,7 @@ func (t *quicListener) WANAddresses() []*url.URL {
 
 func (t *quicListener) LANAddresses() []*url.URL {
 	addrs := []*url.URL{t.uri}
-	network := strings.Replace(t.uri.Scheme, "quic", "udp", -1)
+	network := strings.ReplaceAll(t.uri.Scheme, "quic", "udp")
 	addrs = append(addrs, getURLsForAllAdaptersIfUnspecified(network, t.uri)...)
 	return addrs
 }
@@ -206,11 +210,26 @@ func (f *quicListenerFactory) New(uri *url.URL, cfg config.Wrapper, tlsCfg *tls.
 		conns:   conns,
 		factory: f,
 	}
-	l.ServiceWithError = util.AsServiceWithError(l.serve, l.String())
+	l.ServiceWithError = svcutil.AsService(l.serve, l.String())
 	l.nat.Store(stun.NATUnknown)
 	return l
 }
 
 func (quicListenerFactory) Enabled(cfg config.Configuration) bool {
 	return true
+}
+
+type stunConnQUICWrapper struct {
+	net.PacketConn
+	underlying *net.UDPConn
+}
+
+// SetReadBuffer is required by QUIC < v0.20.0
+func (s *stunConnQUICWrapper) SetReadBuffer(size int) error {
+	return s.underlying.SetReadBuffer(size)
+}
+
+// SyscallConn is required by QUIC
+func (s *stunConnQUICWrapper) SyscallConn() (syscall.RawConn, error) {
+	return s.underlying.SyscallConn()
 }

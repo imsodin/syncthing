@@ -13,7 +13,6 @@ import (
 	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/db"
 	"github.com/syncthing/syncthing/lib/events"
-	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/ignore"
 	"github.com/syncthing/syncthing/lib/protocol"
 	"github.com/syncthing/syncthing/lib/versioner"
@@ -57,17 +56,17 @@ type receiveOnlyFolder struct {
 	*sendReceiveFolder
 }
 
-func newReceiveOnlyFolder(model *model, fset *db.FileSet, ignores *ignore.Matcher, cfg config.FolderConfiguration, ver versioner.Versioner, fs fs.Filesystem, evLogger events.Logger, ioLimiter *byteSemaphore) service {
-	sr := newSendReceiveFolder(model, fset, ignores, cfg, ver, fs, evLogger, ioLimiter).(*sendReceiveFolder)
+func newReceiveOnlyFolder(model *model, fset *db.FileSet, ignores *ignore.Matcher, cfg config.FolderConfiguration, ver versioner.Versioner, evLogger events.Logger, ioLimiter *byteSemaphore) service {
+	sr := newSendReceiveFolder(model, fset, ignores, cfg, ver, evLogger, ioLimiter).(*sendReceiveFolder)
 	sr.localFlags = protocol.FlagLocalReceiveOnly // gets propagated to the scanner, and set on locally changed files
 	return &receiveOnlyFolder{sr}
 }
 
 func (f *receiveOnlyFolder) Revert() {
-	f.doInSync(func() error { f.revert(); return nil })
+	f.doInSync(f.revert)
 }
 
-func (f *receiveOnlyFolder) revert() {
+func (f *receiveOnlyFolder) revert() error {
 	l.Infof("Reverting folder %v", f.Description)
 
 	f.setState(FolderScanning)
@@ -85,7 +84,10 @@ func (f *receiveOnlyFolder) revert() {
 
 	batch := make([]protocol.FileInfo, 0, maxBatchSizeFiles)
 	batchSizeBytes := 0
-	snap := f.fset.Snapshot()
+	snap, err := f.dbSnapshot()
+	if err != nil {
+		return err
+	}
 	defer snap.Release()
 	snap.WithHave(protocol.LocalDeviceID, func(intf protocol.FileIntf) bool {
 		fi := intf.(protocol.FileInfo)
@@ -162,6 +164,8 @@ func (f *receiveOnlyFolder) revert() {
 	// pull by itself. Make sure we schedule one so that we start
 	// downloading files.
 	f.SchedulePull()
+
+	return nil
 }
 
 // deleteQueue handles deletes by delegating to a handler and queuing

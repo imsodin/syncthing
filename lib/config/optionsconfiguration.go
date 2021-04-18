@@ -28,6 +28,35 @@ func (opts OptionsConfiguration) Copy() OptionsConfiguration {
 	return optsCopy
 }
 
+func (opts *OptionsConfiguration) prepare(guiPWIsSet bool) {
+	util.FillNilSlices(opts)
+
+	opts.RawListenAddresses = util.UniqueTrimmedStrings(opts.RawListenAddresses)
+	opts.RawGlobalAnnServers = util.UniqueTrimmedStrings(opts.RawGlobalAnnServers)
+
+	// Very short reconnection intervals are annoying
+	if opts.ReconnectIntervalS < 5 {
+		opts.ReconnectIntervalS = 5
+	}
+
+	if guiPWIsSet && len(opts.UnackedNotificationIDs) > 0 {
+		for i, key := range opts.UnackedNotificationIDs {
+			if key == "authenticationUserAndPassword" {
+				opts.UnackedNotificationIDs = append(opts.UnackedNotificationIDs[:i], opts.UnackedNotificationIDs[i+1:]...)
+				break
+			}
+		}
+	}
+
+	// Negative limits are meaningless, zero means unlimited.
+	if opts.ConnectionLimitEnough < 0 {
+		opts.ConnectionLimitEnough = 0
+	}
+	if opts.ConnectionLimitMax < 0 {
+		opts.ConnectionLimitMax = 0
+	}
+}
+
 // RequiresRestartOnly returns a copy with only the attributes that require
 // restart on change.
 func (opts OptionsConfiguration) RequiresRestartOnly() OptionsConfiguration {
@@ -127,7 +156,7 @@ func (opts OptionsConfiguration) MaxConcurrentIncomingRequestKiB() int {
 		return 0
 	}
 
-	if opts.RawMaxFolderConcurrency == 0 {
+	if opts.RawMaxCIRequestKiB == 0 {
 		// The default is 256 MiB
 		return 256 * 1024 // KiB
 	}
@@ -146,4 +175,28 @@ func (opts OptionsConfiguration) MaxConcurrentIncomingRequestKiB() int {
 
 func (opts OptionsConfiguration) AutoUpgradeEnabled() bool {
 	return opts.AutoUpgradeIntervalH > 0
+}
+
+func (opts OptionsConfiguration) FeatureFlag(name string) bool {
+	for _, flag := range opts.FeatureFlags {
+		if flag == name {
+			return true
+		}
+	}
+
+	return false
+}
+
+// LowestConnectionLimit is the lower of ConnectionLimitEnough or
+// ConnectionLimitMax, or whichever of them is actually set if only one of
+// them is set. It's the point where we should stop dialling.
+func (opts OptionsConfiguration) LowestConnectionLimit() int {
+	limit := opts.ConnectionLimitEnough
+	if limit == 0 || (opts.ConnectionLimitMax != 0 && opts.ConnectionLimitMax < limit) {
+		// It doesn't really make sense to set Max lower than Enough but
+		// someone might do it while experimenting and it's easy for us to
+		// do the right thing.
+		limit = opts.ConnectionLimitMax
+	}
+	return limit
 }

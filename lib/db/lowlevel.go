@@ -10,18 +10,25 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"io"
+	"os"
+	"regexp"
 	"time"
 
 	"github.com/dchest/siphash"
 	"github.com/greatroar/blobloom"
 	"github.com/syncthing/syncthing/lib/db/backend"
+	"github.com/syncthing/syncthing/lib/events"
+	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/protocol"
 	"github.com/syncthing/syncthing/lib/rand"
 	"github.com/syncthing/syncthing/lib/sha256"
+	"github.com/syncthing/syncthing/lib/svcutil"
 	"github.com/syncthing/syncthing/lib/sync"
 	"github.com/syncthing/syncthing/lib/util"
-	"github.com/thejerf/suture"
+	"github.com/thejerf/suture/v4"
 )
 
 const (
@@ -42,6 +49,8 @@ const (
 	versionIndirectionCutoff = 10
 
 	recheckDefaultInterval = 30 * 24 * time.Hour
+
+	needsRepairSuffix = ".needsrepair"
 )
 
 // Lowlevel is the lowest level database interface. It has a very simple
@@ -59,30 +68,40 @@ type Lowlevel struct {
 	gcKeyCount         int
 	indirectGCInterval time.Duration
 	recheckInterval    time.Duration
+	oneFileSetCreated  chan struct{}
+	evLogger           events.Logger
 }
 
-func NewLowlevel(backend backend.Backend, opts ...Option) *Lowlevel {
+func NewLowlevel(backend backend.Backend, evLogger events.Logger, opts ...Option) (*Lowlevel, error) {
+	// Only log restarts in debug mode.
+	spec := svcutil.SpecWithDebugLogger(l)
 	db := &Lowlevel{
-		Supervisor: suture.New("db.Lowlevel", suture.Spec{
-			// Only log restarts in debug mode.
-			Log: func(line string) {
-				l.Debugln(line)
-			},
-			PassThroughPanics: true,
-		}),
+		Supervisor:         suture.New("db.Lowlevel", spec),
 		Backend:            backend,
 		folderIdx:          newSmallIndex(backend, []byte{KeyTypeFolderIdx}),
 		deviceIdx:          newSmallIndex(backend, []byte{KeyTypeDeviceIdx}),
 		gcMut:              sync.NewRWMutex(),
 		indirectGCInterval: indirectGCDefaultInterval,
 		recheckInterval:    recheckDefaultInterval,
+		oneFileSetCreated:  make(chan struct{}),
+		evLogger:           evLogger,
 	}
 	for _, opt := range opts {
 		opt(db)
 	}
 	db.keyer = newDefaultKeyer(db.folderIdx, db.deviceIdx)
-	db.Add(util.AsService(db.gcRunner, "db.Lowlevel/gcRunner"))
-	return db
+	db.Add(svcutil.AsService(db.gcRunner, "db.Lowlevel/gcRunner"))
+	if path := db.needsRepairPath(); path != "" {
+		if _, err := os.Lstat(path); err == nil {
+			l.Infoln("Database was marked for repair - this may take a while")
+			if err := db.checkRepair(); err != nil {
+				db.handleFailure(err)
+				return nil, err
+			}
+			os.Remove(path)
+		}
+	}
+	return db, nil
 }
 
 type Option func(*Lowlevel)
@@ -422,30 +441,32 @@ func (db *Lowlevel) dropDeviceFolder(device, folder []byte, meta *metadataTracke
 	return t.Commit()
 }
 
-func (db *Lowlevel) checkGlobals(folder []byte) error {
+func (db *Lowlevel) checkGlobals(folderStr string) (int, error) {
 	t, err := db.newReadWriteTransaction()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer t.close()
 
+	folder := []byte(folderStr)
 	key, err := db.keyer.GenerateGlobalVersionKey(nil, folder, nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	dbi, err := t.NewPrefixIterator(key.WithoutName())
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer dbi.Release()
 
+	fixed := 0
 	var dk []byte
 	ro := t.readOnlyTransaction
 	for dbi.Next() {
 		var vl VersionList
 		if err := vl.Unmarshal(dbi.Value()); err != nil || vl.Empty() {
-			if err := t.Delete(dbi.Key()); err != nil {
-				return err
+			if err := t.Delete(dbi.Key()); err != nil && !backend.IsNotFound(err) {
+				return 0, err
 			}
 			continue
 		}
@@ -461,34 +482,36 @@ func (db *Lowlevel) checkGlobals(folder []byte) error {
 		for _, fv := range vl.RawVersions {
 			changedHere, err = checkGlobalsFilterDevices(dk, folder, name, fv.Devices, newVL, ro)
 			if err != nil {
-				return err
+				return 0, err
 			}
 			changed = changed || changedHere
 
 			changedHere, err = checkGlobalsFilterDevices(dk, folder, name, fv.InvalidDevices, newVL, ro)
 			if err != nil {
-				return err
+				return 0, err
 			}
 			changed = changed || changedHere
 		}
 
 		if newVL.Empty() {
-			if err := t.Delete(dbi.Key()); err != nil {
-				return err
+			if err := t.Delete(dbi.Key()); err != nil && !backend.IsNotFound(err) {
+				return 0, err
 			}
+			fixed++
 		} else if changed {
 			if err := t.Put(dbi.Key(), mustMarshal(newVL)); err != nil {
-				return err
+				return 0, err
 			}
+			fixed++
 		}
 	}
 	dbi.Release()
 	if err := dbi.Error(); err != nil {
-		return err
+		return 0, err
 	}
 
-	l.Debugf("db check completed for %q", folder)
-	return t.Commit()
+	l.Debugf("global db check completed for %v", folder)
+	return fixed, t.Commit()
 }
 
 func checkGlobalsFilterDevices(dk, folder, name []byte, devices [][]byte, vl *VersionList, t readOnlyTransaction) (bool, error) {
@@ -544,6 +567,26 @@ func (db *Lowlevel) setIndexID(device, folder []byte, id protocol.IndexID) error
 	return db.Put(key, bs)
 }
 
+func (db *Lowlevel) dropFolderIndexIDs(folder []byte) error {
+	t, err := db.newReadWriteTransaction()
+	if err != nil {
+		return err
+	}
+	defer t.close()
+
+	if err := t.deleteKeyPrefixMatching([]byte{KeyTypeIndexID}, func(key []byte) bool {
+		keyFolder, ok := t.keyer.FolderFromIndexIDKey(key)
+		if !ok {
+			l.Debugf("Deleting IndexID with missing FolderIdx: %v", key)
+			return true
+		}
+		return bytes.Equal(keyFolder, folder)
+	}); err != nil {
+		return err
+	}
+	return t.Commit()
+}
+
 func (db *Lowlevel) dropMtimes(folder []byte) error {
 	key, err := db.keyer.GenerateMtimesKey(nil, folder)
 	if err != nil {
@@ -573,7 +616,7 @@ func (db *Lowlevel) dropPrefix(prefix []byte) error {
 	return t.Commit()
 }
 
-func (db *Lowlevel) gcRunner(ctx context.Context) {
+func (db *Lowlevel) gcRunner(ctx context.Context) error {
 	// Calculate the time for the next GC run. Even if we should run GC
 	// directly, give the system a while to get up and running and do other
 	// stuff first. (We might have migrations and stuff which would be
@@ -589,7 +632,7 @@ func (db *Lowlevel) gcRunner(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		case <-t.C:
 			if err := db.gcIndirect(ctx); err != nil {
 				l.Warnln("Database indirection GC failed:", err)
@@ -790,51 +833,64 @@ func (b *bloomFilter) hash(id []byte) uint64 {
 	return siphash.Hash(b.k0, b.k1, id)
 }
 
-// CheckRepair checks folder metadata and sequences for miscellaneous errors.
-func (db *Lowlevel) CheckRepair() {
+// checkRepair checks folder metadata and sequences for miscellaneous errors.
+func (db *Lowlevel) checkRepair() error {
+	db.gcMut.RLock()
+	defer db.gcMut.RUnlock()
 	for _, folder := range db.ListFolders() {
-		_ = db.getMetaAndCheck(folder)
+		if _, err := db.getMetaAndCheckGCLocked(folder); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
-func (db *Lowlevel) getMetaAndCheck(folder string) *metadataTracker {
+func (db *Lowlevel) getMetaAndCheck(folder string) (*metadataTracker, error) {
 	db.gcMut.RLock()
 	defer db.gcMut.RUnlock()
 
-	var err error
-	defer func() {
-		if err != nil && !backend.IsClosed(err) {
-			panic(err)
-		}
-	}()
+	return db.getMetaAndCheckGCLocked(folder)
+}
 
-	var fixed int
-	fixed, err = db.checkLocalNeed([]byte(folder))
+func (db *Lowlevel) getMetaAndCheckGCLocked(folder string) (*metadataTracker, error) {
+	fixed, err := db.checkLocalNeed([]byte(folder))
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("checking local need: %w", err)
 	}
 	if fixed != 0 {
 		l.Infof("Repaired %d local need entries for folder %v in database", fixed, folder)
 	}
 
+	fixed, err = db.checkGlobals(folder)
+	if err != nil {
+		return nil, fmt.Errorf("checking globals: %w", err)
+	}
+	if fixed != 0 {
+		l.Infof("Repaired %d global entries for folder %v in database", fixed, folder)
+	}
+
 	meta, err := db.recalcMeta(folder)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("recalculating metadata: %w", err)
 	}
 
 	fixed, err = db.repairSequenceGCLocked(folder, meta)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("repairing sequences: %w", err)
 	}
 	if fixed != 0 {
 		l.Infof("Repaired %d sequence entries for folder %v in database", fixed, folder)
+		meta, err = db.recalcMeta(folder)
+		if err != nil {
+			return nil, fmt.Errorf("recalculating metadata: %w", err)
+		}
 	}
 
-	return meta
+	return meta, nil
 }
 
-func (db *Lowlevel) loadMetadataTracker(folder string) *metadataTracker {
-	meta := newMetadataTracker(db.keyer)
+func (db *Lowlevel) loadMetadataTracker(folder string) (*metadataTracker, error) {
+	meta := newMetadataTracker(db.keyer, db.evLogger)
 	if err := meta.fromDB(db, []byte(folder)); err != nil {
 		if err == errMetaInconsistent {
 			l.Infof("Stored folder metadata for %q is inconsistent; recalculating", folder)
@@ -846,7 +902,9 @@ func (db *Lowlevel) loadMetadataTracker(folder string) *metadataTracker {
 	}
 
 	curSeq := meta.Sequence(protocol.LocalDeviceID)
-	if metaOK := db.verifyLocalSequence(curSeq, folder); !metaOK {
+	if metaOK, err := db.verifyLocalSequence(curSeq, folder); err != nil {
+		return nil, fmt.Errorf("verifying sequences: %w", err)
+	} else if !metaOK {
 		l.Infof("Stored folder metadata for %q is out of date after crash; recalculating", folder)
 		return db.getMetaAndCheck(folder)
 	}
@@ -856,16 +914,13 @@ func (db *Lowlevel) loadMetadataTracker(folder string) *metadataTracker {
 		return db.getMetaAndCheck(folder)
 	}
 
-	return meta
+	return meta, nil
 }
 
 func (db *Lowlevel) recalcMeta(folderStr string) (*metadataTracker, error) {
 	folder := []byte(folderStr)
 
-	meta := newMetadataTracker(db.keyer)
-	if err := db.checkGlobals(folder); err != nil {
-		return nil, err
-	}
+	meta := newMetadataTracker(db.keyer, db.evLogger)
 
 	t, err := db.newReadWriteTransaction(meta.CommitHook(folder))
 	if err != nil {
@@ -887,6 +942,9 @@ func (db *Lowlevel) recalcMeta(folderStr string) (*metadataTracker, error) {
 		meta.addFile(protocol.GlobalDeviceID, f)
 		return true
 	})
+	if err != nil {
+		return nil, err
+	}
 
 	meta.emptyNeeded(protocol.LocalDeviceID)
 	err = t.withNeed(folder, protocol.LocalDeviceID[:], true, func(f protocol.FileIntf) bool {
@@ -916,7 +974,7 @@ func (db *Lowlevel) recalcMeta(folderStr string) (*metadataTracker, error) {
 
 // Verify the local sequence number from actual sequence entries. Returns
 // true if it was all good, or false if a fixup was necessary.
-func (db *Lowlevel) verifyLocalSequence(curSeq int64, folder string) bool {
+func (db *Lowlevel) verifyLocalSequence(curSeq int64, folder string) (bool, error) {
 	// Walk the sequence index from the current (supposedly) highest
 	// sequence number and raise the alarm if we get anything. This recovers
 	// from the occasion where we have written sequence entries to disk but
@@ -929,18 +987,18 @@ func (db *Lowlevel) verifyLocalSequence(curSeq int64, folder string) bool {
 
 	t, err := db.newReadOnlyTransaction()
 	if err != nil {
-		panic(err)
+		return false, err
 	}
 	ok := true
 	if err := t.withHaveSequence([]byte(folder), curSeq+1, func(fi protocol.FileIntf) bool {
 		ok = false // we got something, which we should not have
 		return false
-	}); err != nil && !backend.IsClosed(err) {
-		panic(err)
+	}); err != nil {
+		return false, err
 	}
 	t.close()
 
-	return ok
+	return ok, nil
 }
 
 // repairSequenceGCLocked makes sure the sequence numbers in the sequence keys
@@ -974,6 +1032,34 @@ func (db *Lowlevel) repairSequenceGCLocked(folderStr string, meta *metadataTrack
 	for it.Next() {
 		intf, err := t.unmarshalTrunc(it.Value(), false)
 		if err != nil {
+			// Delete local items with invalid indirected blocks/versions.
+			// They will be rescanned.
+			var ierr *blocksIndirectionError
+			if ok := errors.As(err, &ierr); ok && backend.IsNotFound(err) {
+				intf, err = t.unmarshalTrunc(it.Value(), true)
+				if err != nil {
+					return 0, err
+				}
+				name := []byte(intf.FileName())
+				gk, err := t.keyer.GenerateGlobalVersionKey(nil, folder, name)
+				if err != nil {
+					return 0, err
+				}
+				_, err = t.removeFromGlobal(gk, nil, folder, protocol.LocalDeviceID[:], name, nil)
+				if err != nil {
+					return 0, err
+				}
+				sk, err = db.keyer.GenerateSequenceKey(sk, folder, intf.SequenceNo())
+				if err != nil {
+					return 0, err
+				}
+				if err := t.Delete(sk); err != nil {
+					return 0, err
+				}
+				if err := t.Delete(it.Key()); err != nil {
+					return 0, err
+				}
+			}
 			return 0, err
 		}
 		fi := intf.(protocol.FileInfo)
@@ -1083,7 +1169,7 @@ func (db *Lowlevel) checkLocalNeed(folder []byte) (int, error) {
 		f := fi.(FileInfoTruncated)
 		for !needDone && needName < f.Name {
 			repaired++
-			if err = t.Delete(dbi.Key()); err != nil {
+			if err = t.Delete(dbi.Key()); err != nil && !backend.IsNotFound(err) {
 				return false
 			}
 			l.Debugln("check local need: removing", needName)
@@ -1110,7 +1196,7 @@ func (db *Lowlevel) checkLocalNeed(folder []byte) (int, error) {
 
 	for !needDone {
 		repaired++
-		if err := t.Delete(dbi.Key()); err != nil {
+		if err := t.Delete(dbi.Key()); err != nil && !backend.IsNotFound(err) {
 			return 0, err
 		}
 		l.Debugln("check local need: removing", needName)
@@ -1129,9 +1215,44 @@ func (db *Lowlevel) checkLocalNeed(folder []byte) (int, error) {
 	return repaired, nil
 }
 
+func (db *Lowlevel) needsRepairPath() string {
+	path := db.Location()
+	if path == "" {
+		return ""
+	}
+	if path[len(path)-1] == fs.PathSeparator {
+		path = path[:len(path)-1]
+	}
+	return path + needsRepairSuffix
+}
+
+func (db *Lowlevel) checkErrorForRepair(err error) {
+	if errors.Is(err, errEntryFromGlobalMissing) || errors.Is(err, errEmptyGlobal) {
+		// Inconsistency error, mark db for repair on next start.
+		if path := db.needsRepairPath(); path != "" {
+			if fd, err := os.Create(path); err == nil {
+				fd.Close()
+			}
+		}
+	}
+}
+
 // unchanged checks if two files are the same and thus don't need to be updated.
 // Local flags or the invalid bit might change without the version
 // being bumped.
 func unchanged(nf, ef protocol.FileIntf) bool {
 	return ef.FileVersion().Equal(nf.FileVersion()) && ef.IsInvalid() == nf.IsInvalid() && ef.FileLocalFlags() == nf.FileLocalFlags()
+}
+
+func (db *Lowlevel) handleFailure(err error) {
+	db.checkErrorForRepair(err)
+	if shouldReportFailure(err) {
+		db.evLogger.Log(events.Failure, err.Error())
+	}
+}
+
+var ldbPathRe = regexp.MustCompile(`(open|write|read) .+[\\/].+[\\/]index[^\\/]+[\\/][^\\/]+: `)
+
+func shouldReportFailure(err error) bool {
+	return !ldbPathRe.MatchString(err.Error())
 }

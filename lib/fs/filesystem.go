@@ -47,6 +47,7 @@ type Filesystem interface {
 	Usage(name string) (Usage, error)
 	Type() FilesystemType
 	URI() string
+	Options() []Option
 	SameFile(fi1, fi2 FileInfo) bool
 }
 
@@ -91,8 +92,8 @@ func (fm FileMode) String() string {
 
 // Usage represents filesystem space usage
 type Usage struct {
-	Free  int64
-	Total int64
+	Free  uint64
+	Total uint64
 }
 
 type Matcher interface {
@@ -178,7 +179,16 @@ var IsPermission = os.IsPermission
 // IsPathSeparator is the equivalent of os.IsPathSeparator
 var IsPathSeparator = os.IsPathSeparator
 
-type Option func(Filesystem)
+// Option modifies a filesystem at creation. An option might be specific
+// to a filesystem-type.
+//
+// String is used to detect options with the same effect, i.e. must be different
+// for options with different effects. Meaning if an option has parameters, a
+// representation of those must be part of the returned string.
+type Option interface {
+	String() string
+	apply(Filesystem)
+}
 
 func NewFilesystem(fsType FilesystemType, uri string, opts ...Option) Filesystem {
 	var fs Filesystem
@@ -234,7 +244,7 @@ func Canonicalize(file string) (string, error) {
 		// The relative path may pretend to be an absolute path within
 		// the root, but the double path separator on Windows implies
 		// something else and is out of spec.
-		return "", ErrNotRelative
+		return "", errNotRelative
 	}
 
 	// The relative path should be clean from internal dotdots and similar
@@ -242,12 +252,11 @@ func Canonicalize(file string) (string, error) {
 	file = filepath.Clean(file)
 
 	// It is not acceptable to attempt to traverse upwards.
-	switch file {
-	case "..":
-		return "", ErrNotRelative
+	if file == ".." {
+		return "", errNotRelative
 	}
 	if strings.HasPrefix(file, ".."+pathSep) {
-		return "", ErrNotRelative
+		return "", errNotRelative
 	}
 
 	if strings.HasPrefix(file, pathSep) {
@@ -258,4 +267,35 @@ func Canonicalize(file string) (string, error) {
 	}
 
 	return file, nil
+}
+
+// wrapFilesystem should always be used when wrapping a Filesystem.
+// It ensures proper wrapping order, which right now means:
+// `logFilesystem` needs to be the outermost wrapper for caller lookup.
+func wrapFilesystem(fs Filesystem, wrapFn func(Filesystem) Filesystem) Filesystem {
+	logFs, ok := fs.(*logFilesystem)
+	if ok {
+		fs = logFs.Filesystem
+	}
+	fs = wrapFn(fs)
+	if ok {
+		fs = &logFilesystem{fs}
+	}
+	return fs
+}
+
+// unwrapFilesystem removes "wrapping" filesystems to expose the underlying filesystem.
+func unwrapFilesystem(fs Filesystem) Filesystem {
+	for {
+		switch sfs := fs.(type) {
+		case *logFilesystem:
+			fs = sfs.Filesystem
+		case *walkFilesystem:
+			fs = sfs.Filesystem
+		case *mtimeFS:
+			fs = sfs.Filesystem
+		default:
+			return sfs
+		}
+	}
 }

@@ -4,6 +4,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
 
+//go:generate counterfeiter -o mocks/folderSummaryService.go --fake-name FolderSummaryService . FolderSummaryService
+
 package model
 
 import (
@@ -12,14 +14,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thejerf/suture"
+	"github.com/thejerf/suture/v4"
 
 	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/db"
 	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/protocol"
+	"github.com/syncthing/syncthing/lib/svcutil"
 	"github.com/syncthing/syncthing/lib/sync"
-	"github.com/syncthing/syncthing/lib/util"
 )
 
 const maxDurationSinceLastEventReq = time.Minute
@@ -52,9 +54,7 @@ type folderSummaryService struct {
 
 func NewFolderSummaryService(cfg config.Wrapper, m Model, id protocol.DeviceID, evLogger events.Logger) FolderSummaryService {
 	service := &folderSummaryService{
-		Supervisor: suture.New("folderSummaryService", suture.Spec{
-			PassThroughPanics: true,
-		}),
+		Supervisor:      suture.New("folderSummaryService", svcutil.SpecWithDebugLogger(l)),
 		cfg:             cfg,
 		model:           m,
 		id:              id,
@@ -65,8 +65,8 @@ func NewFolderSummaryService(cfg config.Wrapper, m Model, id protocol.DeviceID, 
 		lastEventReqMut: sync.NewMutex(),
 	}
 
-	service.Add(util.AsService(service.listenForUpdates, fmt.Sprintf("%s/listenForUpdates", service)))
-	service.Add(util.AsService(service.calculateSummaries, fmt.Sprintf("%s/calculateSummaries", service)))
+	service.Add(svcutil.AsService(service.listenForUpdates, fmt.Sprintf("%s/listenForUpdates", service)))
+	service.Add(svcutil.AsService(service.calculateSummaries, fmt.Sprintf("%s/calculateSummaries", service)))
 
 	return service
 }
@@ -96,7 +96,7 @@ func (c *folderSummaryService) Summary(folder string) (map[string]interface{}, e
 	// For API backwards compatibility (SyncTrayzor needs it) an empty folder
 	// summary is returned for not running folders, an error might actually be
 	// more appropriate
-	if err != nil && err != ErrFolderPaused && err != errFolderNotRunning {
+	if err != nil && err != ErrFolderPaused && err != ErrFolderNotRunning {
 		return nil, err
 	}
 
@@ -123,9 +123,9 @@ func (c *folderSummaryService) Summary(folder string) (map[string]interface{}, e
 	}
 	res["needFiles"], res["needDirectories"], res["needSymlinks"], res["needDeletes"], res["needBytes"], res["needTotalItems"] = need.Files, need.Directories, need.Symlinks, need.Deleted, need.Bytes, need.TotalItems()
 
-	if haveFcfg && fcfg.Type == config.FolderTypeReceiveOnly {
+	if haveFcfg && (fcfg.Type == config.FolderTypeReceiveOnly || fcfg.Type == config.FolderTypeReceiveEncrypted) {
 		// Add statistics for things that have changed locally in a receive
-		// only folder.
+		// only or receive encrypted folder.
 		res["receiveOnlyChangedFiles"] = ro.Files
 		res["receiveOnlyChangedDirectories"] = ro.Directories
 		res["receiveOnlyChangedSymlinks"] = ro.Symlinks
@@ -144,7 +144,7 @@ func (c *folderSummaryService) Summary(folder string) (map[string]interface{}, e
 	res["version"] = ourSeq + remoteSeq  // legacy
 	res["sequence"] = ourSeq + remoteSeq // new name
 
-	ignorePatterns, _, _ := c.model.GetIgnores(folder)
+	ignorePatterns, _, _ := c.model.CurrentIgnores(folder)
 	res["ignorePatterns"] = false
 	for _, line := range ignorePatterns {
 		if len(line) > 0 && !strings.HasPrefix(line, "//") {
@@ -169,7 +169,7 @@ func (c *folderSummaryService) OnEventRequest() {
 
 // listenForUpdates subscribes to the event bus and makes note of folders that
 // need their data recalculated.
-func (c *folderSummaryService) listenForUpdates(ctx context.Context) {
+func (c *folderSummaryService) listenForUpdates(ctx context.Context) error {
 	sub := c.evLogger.Subscribe(events.LocalIndexUpdated | events.RemoteIndexUpdated | events.StateChanged | events.RemoteDownloadProgress | events.DeviceConnected | events.FolderWatchStateChanged | events.DownloadProgress)
 	defer sub.Unsubscribe()
 
@@ -180,7 +180,7 @@ func (c *folderSummaryService) listenForUpdates(ctx context.Context) {
 		case ev := <-sub.C():
 			c.processUpdate(ev)
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		}
 	}
 }
@@ -261,7 +261,7 @@ func (c *folderSummaryService) processUpdate(ev events.Event) {
 
 // calculateSummaries periodically recalculates folder summaries and
 // completion percentage, and sends the results on the event bus.
-func (c *folderSummaryService) calculateSummaries(ctx context.Context) {
+func (c *folderSummaryService) calculateSummaries(ctx context.Context) error {
 	const pumpInterval = 2 * time.Second
 	pump := time.NewTimer(pumpInterval)
 
@@ -272,7 +272,7 @@ func (c *folderSummaryService) calculateSummaries(ctx context.Context) {
 			for _, folder := range c.foldersToHandle() {
 				select {
 				case <-ctx.Done():
-					return
+					return ctx.Err()
 				default:
 				}
 				c.sendSummary(ctx, folder)
@@ -288,7 +288,7 @@ func (c *folderSummaryService) calculateSummaries(ctx context.Context) {
 			c.sendSummary(ctx, folder)
 
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		}
 	}
 }
@@ -348,9 +348,14 @@ func (c *folderSummaryService) sendSummary(ctx context.Context, folder string) {
 
 		// Get completion percentage of this folder for the
 		// remote device.
-		comp := c.model.Completion(devCfg.DeviceID, folder).Map()
-		comp["folder"] = folder
-		comp["device"] = devCfg.DeviceID.String()
-		c.evLogger.Log(events.FolderCompletion, comp)
+		comp, err := c.model.Completion(devCfg.DeviceID, folder)
+		if err != nil {
+			l.Debugf("Error getting completion for folder %v, device %v: %v", folder, devCfg.DeviceID, err)
+			continue
+		}
+		ev := comp.Map()
+		ev["folder"] = folder
+		ev["device"] = devCfg.DeviceID.String()
+		c.evLogger.Log(events.FolderCompletion, ev)
 	}
 }

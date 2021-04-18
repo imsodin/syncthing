@@ -18,7 +18,7 @@ import (
 	"github.com/syncthing/syncthing/lib/connections/registry"
 	"github.com/syncthing/syncthing/lib/dialer"
 	"github.com/syncthing/syncthing/lib/nat"
-	"github.com/syncthing/syncthing/lib/util"
+	"github.com/syncthing/syncthing/lib/svcutil"
 )
 
 func init() {
@@ -29,7 +29,7 @@ func init() {
 }
 
 type tcpListener struct {
-	util.ServiceWithError
+	svcutil.ServiceWithError
 	onAddressesChangedNotifier
 
 	uri     *url.URL
@@ -137,7 +137,7 @@ func (t *tcpListener) serve(ctx context.Context) error {
 			continue
 		}
 
-		t.conns <- internalConn{tc, connTypeTCPServer, tcpPriority}
+		t.conns <- newInternalConn(tc, connTypeTCPServer, tcpPriority)
 	}
 }
 
@@ -146,7 +146,7 @@ func (t *tcpListener) URI() *url.URL {
 }
 
 func (t *tcpListener) WANAddresses() []*url.URL {
-	uris := t.LANAddresses()
+	uris := []*url.URL{t.uri}
 	t.mut.RLock()
 	if t.mapping != nil {
 		addrs := t.mapping.ExternalAddresses()
@@ -207,7 +207,7 @@ func (f *tcpListenerFactory) New(uri *url.URL, cfg config.Wrapper, tlsCfg *tls.C
 		natService: natService,
 		factory:    f,
 	}
-	l.ServiceWithError = util.AsServiceWithError(l.serve, l.String())
+	l.ServiceWithError = svcutil.AsService(l.serve, l.String())
 	return l
 }
 

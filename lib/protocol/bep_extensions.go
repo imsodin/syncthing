@@ -5,6 +5,7 @@ package protocol
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"runtime"
@@ -57,7 +58,7 @@ func (f FileInfo) String() string {
 	case FileInfoTypeFile:
 		return fmt.Sprintf("File{Name:%q, Sequence:%d, Permissions:0%o, ModTime:%v, Version:%v, VersionHash:%x, Length:%d, Deleted:%v, Invalid:%v, LocalFlags:0x%x, NoPermissions:%v, BlockSize:%d, Blocks:%v, BlocksHash:%x}",
 			f.Name, f.Sequence, f.Permissions, f.ModTime(), f.Version, f.VersionHash, f.Size, f.Deleted, f.RawInvalid, f.LocalFlags, f.NoPermissions, f.RawBlockSize, f.Blocks, f.BlocksHash)
-	case FileInfoTypeSymlink, FileInfoTypeDeprecatedSymlinkDirectory, FileInfoTypeDeprecatedSymlinkFile:
+	case FileInfoTypeSymlink, FileInfoTypeSymlinkDirectory, FileInfoTypeSymlinkFile:
 		return fmt.Sprintf("Symlink{Name:%q, Type:%v, Sequence:%d, Version:%v, VersionHash:%x, Deleted:%v, Invalid:%v, LocalFlags:0x%x, NoPermissions:%v, SymlinkTarget:%q}",
 			f.Name, f.Type, f.Sequence, f.Version, f.VersionHash, f.Deleted, f.RawInvalid, f.LocalFlags, f.NoPermissions, f.SymlinkTarget)
 	default:
@@ -99,7 +100,7 @@ func (f FileInfo) ShouldConflict() bool {
 
 func (f FileInfo) IsSymlink() bool {
 	switch f.Type {
-	case FileInfoTypeSymlink, FileInfoTypeDeprecatedSymlinkDirectory, FileInfoTypeDeprecatedSymlinkFile:
+	case FileInfoTypeSymlink, FileInfoTypeSymlinkDirectory, FileInfoTypeSymlinkFile:
 		return true
 	default:
 		return false
@@ -187,10 +188,6 @@ func WinsConflict(f, other FileIntf) bool {
 	// The modification times were equal. Use the device ID in the version
 	// vector as tie breaker.
 	return f.FileVersion().Compare(other.FileVersion()) == ConcurrentGreater
-}
-
-func (f FileInfo) IsEmpty() bool {
-	return f.Version.Counters == nil
 }
 
 func (f FileInfo) IsEquivalent(other FileInfo, modTimeWindow time.Duration) bool {
@@ -300,16 +297,16 @@ func blocksEqual(a, b []BlockInfo) bool {
 	return true
 }
 
-func (f *FileInfo) SetMustRescan(by ShortID) {
-	f.setLocalFlags(by, FlagLocalMustRescan)
+func (f *FileInfo) SetMustRescan() {
+	f.setLocalFlags(FlagLocalMustRescan)
 }
 
-func (f *FileInfo) SetIgnored(by ShortID) {
-	f.setLocalFlags(by, FlagLocalIgnored)
+func (f *FileInfo) SetIgnored() {
+	f.setLocalFlags(FlagLocalIgnored)
 }
 
-func (f *FileInfo) SetUnsupported(by ShortID) {
-	f.setLocalFlags(by, FlagLocalUnsupported)
+func (f *FileInfo) SetUnsupported() {
+	f.setLocalFlags(FlagLocalUnsupported)
 }
 
 func (f *FileInfo) SetDeleted(by ShortID) {
@@ -320,10 +317,9 @@ func (f *FileInfo) SetDeleted(by ShortID) {
 	f.setNoContent()
 }
 
-func (f *FileInfo) setLocalFlags(by ShortID, flags uint32) {
+func (f *FileInfo) setLocalFlags(flags uint32) {
 	f.RawInvalid = false
 	f.LocalFlags = flags
-	f.ModifiedBy = by
 	f.setNoContent()
 }
 
@@ -397,4 +393,21 @@ func VectorHash(v Vector) []byte {
 		}
 	}
 	return h.Sum(nil)
+}
+
+func (x *FileInfoType) MarshalJSON() ([]byte, error) {
+	return json.Marshal(x.String())
+}
+
+func (x *FileInfoType) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	n, ok := FileInfoType_value[s]
+	if !ok {
+		return errors.New("invalid value: " + s)
+	}
+	*x = FileInfoType(n)
+	return nil
 }

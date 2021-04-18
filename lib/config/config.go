@@ -25,13 +25,12 @@ import (
 
 	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/protocol"
-	"github.com/syncthing/syncthing/lib/rand"
 	"github.com/syncthing/syncthing/lib/util"
 )
 
 const (
 	OldestHandledVersion = 10
-	CurrentVersion       = 32
+	CurrentVersion       = 35
 	MaxRescanIntervalS   = 365 * 24 * 60 * 60
 )
 
@@ -105,8 +104,6 @@ func New(myID protocol.DeviceID) Configuration {
 	cfg.Options.UnackedNotificationIDs = []string{"authenticationUserAndPassword"}
 
 	util.SetDefaults(&cfg)
-	util.SetDefaults(&cfg.Options)
-	util.SetDefaults(&cfg.GUI)
 
 	// Can't happen.
 	if err := cfg.prepare(myID); err != nil {
@@ -152,8 +149,6 @@ func ReadXML(r io.Reader, myID protocol.DeviceID) (Configuration, int, error) {
 	var cfg xmlConfiguration
 
 	util.SetDefaults(&cfg)
-	util.SetDefaults(&cfg.Options)
-	util.SetDefaults(&cfg.GUI)
 
 	if err := xml.NewDecoder(r).Decode(&cfg); err != nil {
 		return Configuration{}, 0, err
@@ -171,8 +166,6 @@ func ReadJSON(r io.Reader, myID protocol.DeviceID) (Configuration, error) {
 	var cfg Configuration
 
 	util.SetDefaults(&cfg)
-	util.SetDefaults(&cfg.Options)
-	util.SetDefaults(&cfg.GUI)
 
 	bs, err := ioutil.ReadAll(r)
 	if err != nil {
@@ -211,9 +204,6 @@ func (cfg Configuration) Copy() Configuration {
 	newCfg.IgnoredDevices = make([]ObservedDevice, len(cfg.IgnoredDevices))
 	copy(newCfg.IgnoredDevices, cfg.IgnoredDevices)
 
-	newCfg.PendingDevices = make([]ObservedDevice, len(cfg.PendingDevices))
-	copy(newCfg.PendingDevices, cfg.PendingDevices)
-
 	return newCfg
 }
 
@@ -230,38 +220,60 @@ func (cfg *Configuration) WriteXML(w io.Writer) error {
 }
 
 func (cfg *Configuration) prepare(myID protocol.DeviceID) error {
-	var myName string
+	cfg.ensureMyDevice(myID)
 
-	// Ensure this device is present in the config
-	for _, device := range cfg.Devices {
-		if device.DeviceID == myID {
-			goto found
-		}
-	}
-
-	myName, _ = os.Hostname()
-	cfg.Devices = append(cfg.Devices, DeviceConfiguration{
-		DeviceID: myID,
-		Name:     myName,
-	})
-
-found:
-
-	if err := cfg.clean(); err != nil {
+	existingDevices, err := cfg.prepareFoldersAndDevices(myID)
+	if err != nil {
 		return err
 	}
 
-	// Ensure that we are part of the devices
-	for i := range cfg.Folders {
-		cfg.Folders[i].Devices = ensureDevicePresent(cfg.Folders[i].Devices, myID)
-	}
+	cfg.GUI.prepare()
+
+	guiPWIsSet := cfg.GUI.User != "" && cfg.GUI.Password != ""
+	cfg.Options.prepare(guiPWIsSet)
+
+	cfg.prepareIgnoredDevices(existingDevices)
+
+	cfg.Defaults.prepare(myID, existingDevices)
+
+	cfg.removeDeprecatedProtocols()
+
+	util.FillNilExceptDeprecated(cfg)
+
+	// TestIssue1750 relies on migrations happening after preparing options.
+	cfg.applyMigrations()
 
 	return nil
 }
 
-func (cfg *Configuration) clean() error {
-	util.FillNilSlices(&cfg.Options)
+func (cfg *Configuration) ensureMyDevice(myID protocol.DeviceID) {
+	for _, device := range cfg.Devices {
+		if device.DeviceID == myID {
+			return
+		}
+	}
 
+	myName, _ := os.Hostname()
+	cfg.Devices = append(cfg.Devices, DeviceConfiguration{
+		DeviceID: myID,
+		Name:     myName,
+	})
+}
+
+func (cfg *Configuration) prepareFoldersAndDevices(myID protocol.DeviceID) (map[protocol.DeviceID]bool, error) {
+	existingDevices := cfg.prepareDeviceList()
+
+	sharedFolders, err := cfg.prepareFolders(myID, existingDevices)
+	if err != nil {
+		return nil, err
+	}
+
+	cfg.prepareDevices(sharedFolders)
+
+	return existingDevices, nil
+}
+
+func (cfg *Configuration) prepareDeviceList() map[protocol.DeviceID]bool {
 	// Ensure that the device list is
 	// - free from duplicates
 	// - no devices with empty ID
@@ -272,87 +284,62 @@ func (cfg *Configuration) clean() error {
 		return cfg.Devices[a].DeviceID.Compare(cfg.Devices[b].DeviceID) == -1
 	})
 
+	// Build a list of available devices
+	existingDevices := make(map[protocol.DeviceID]bool, len(cfg.Devices))
+	for _, device := range cfg.Devices {
+		existingDevices[device.DeviceID] = true
+	}
+	return existingDevices
+}
+
+func (cfg *Configuration) prepareFolders(myID protocol.DeviceID, existingDevices map[protocol.DeviceID]bool) (map[protocol.DeviceID][]string, error) {
 	// Prepare folders and check for duplicates. Duplicates are bad and
 	// dangerous, can't currently be resolved in the GUI, and shouldn't
 	// happen when configured by the GUI. We return with an error in that
 	// situation.
-	existingFolders := make(map[string]*FolderConfiguration)
+	sharedFolders := make(map[protocol.DeviceID][]string, len(cfg.Devices))
+	existingFolders := make(map[string]*FolderConfiguration, len(cfg.Folders))
 	for i := range cfg.Folders {
 		folder := &cfg.Folders[i]
-		folder.prepare()
 
 		if folder.ID == "" {
-			return errFolderIDEmpty
+			return nil, errFolderIDEmpty
 		}
 
 		if folder.Path == "" {
-			return fmt.Errorf("folder %q: %w", folder.ID, errFolderPathEmpty)
+			return nil, fmt.Errorf("folder %q: %w", folder.ID, errFolderPathEmpty)
 		}
 
 		if _, ok := existingFolders[folder.ID]; ok {
-			return fmt.Errorf("folder %q: %w", folder.ID, errFolderIDDuplicate)
+			return nil, fmt.Errorf("folder %q: %w", folder.ID, errFolderIDDuplicate)
 		}
 
+		folder.prepare(myID, existingDevices)
+
 		existingFolders[folder.ID] = folder
+
+		for _, dev := range folder.Devices {
+			sharedFolders[dev.DeviceID] = append(sharedFolders[dev.DeviceID], folder.ID)
+		}
 	}
-
-	cfg.Options.RawListenAddresses = util.UniqueTrimmedStrings(cfg.Options.RawListenAddresses)
-	cfg.Options.RawGlobalAnnServers = util.UniqueTrimmedStrings(cfg.Options.RawGlobalAnnServers)
-
-	if cfg.Version > 0 && cfg.Version < OldestHandledVersion {
-		l.Warnf("Configuration version %d is deprecated. Attempting best effort conversion, but please verify manually.", cfg.Version)
-	}
-
-	// Upgrade configuration versions as appropriate
-	migrations.apply(cfg)
-
-	// Build a list of available devices
-	existingDevices := make(map[protocol.DeviceID]bool)
-	for _, device := range cfg.Devices {
-		existingDevices[device.DeviceID] = true
-	}
-
 	// Ensure that the folder list is sorted by ID
 	sort.Slice(cfg.Folders, func(a, b int) bool {
 		return cfg.Folders[a].ID < cfg.Folders[b].ID
 	})
+	return sharedFolders, nil
+}
 
-	// Ensure that in all folder configs
-	// - any loose devices are not present in the wrong places
-	// - there are no duplicate devices
-	// - the versioning configuration parameter map is not nil
-	sharedFolders := make(map[protocol.DeviceID][]string, len(cfg.Devices))
-	for i := range cfg.Folders {
-		cfg.Folders[i].Devices = ensureExistingDevices(cfg.Folders[i].Devices, existingDevices)
-		cfg.Folders[i].Devices = ensureNoDuplicateFolderDevices(cfg.Folders[i].Devices)
-		if cfg.Folders[i].Versioning.Params == nil {
-			cfg.Folders[i].Versioning.Params = map[string]string{}
-		}
-		sort.Slice(cfg.Folders[i].Devices, func(a, b int) bool {
-			return cfg.Folders[i].Devices[a].DeviceID.Compare(cfg.Folders[i].Devices[b].DeviceID) == -1
-		})
-		for _, dev := range cfg.Folders[i].Devices {
-			sharedFolders[dev.DeviceID] = append(sharedFolders[dev.DeviceID], cfg.Folders[i].ID)
-		}
-	}
-
+func (cfg *Configuration) prepareDevices(sharedFolders map[protocol.DeviceID][]string) {
 	for i := range cfg.Devices {
 		cfg.Devices[i].prepare(sharedFolders[cfg.Devices[i].DeviceID])
 	}
+}
 
-	// Very short reconnection intervals are annoying
-	if cfg.Options.ReconnectIntervalS < 5 {
-		cfg.Options.ReconnectIntervalS = 5
-	}
-
-	if cfg.GUI.APIKey == "" {
-		cfg.GUI.APIKey = rand.String(32)
-	}
-
+func (cfg *Configuration) prepareIgnoredDevices(existingDevices map[protocol.DeviceID]bool) map[protocol.DeviceID]bool {
 	// The list of ignored devices should not contain any devices that have
 	// been manually added to the config.
-	var newIgnoredDevices []ObservedDevice
-	ignoredDevices := make(map[protocol.DeviceID]bool)
+	newIgnoredDevices := cfg.IgnoredDevices[:0]
+	ignoredDevices := make(map[protocol.DeviceID]bool, len(cfg.IgnoredDevices))
 	for _, dev := range cfg.IgnoredDevices {
 		if !existingDevices[dev.ID] {
 			ignoredDevices[dev.ID] = true
@@ -360,30 +347,10 @@ func (cfg *Configuration) clean() error {
 		}
 	}
 	cfg.IgnoredDevices = newIgnoredDevices
+	return ignoredDevices
+}
 
-	// The list of pending devices should not contain devices that were added manually, nor should it contain
-	// ignored devices.
-
-	// Sort by time, so that in case of duplicates latest "time" is used.
-	sort.Slice(cfg.PendingDevices, func(i, j int) bool {
-		return cfg.PendingDevices[i].Time.Before(cfg.PendingDevices[j].Time)
-	})
-
-	var newPendingDevices []ObservedDevice
-nextPendingDevice:
-	for _, pendingDevice := range cfg.PendingDevices {
-		if !existingDevices[pendingDevice.ID] && !ignoredDevices[pendingDevice.ID] {
-			// Deduplicate
-			for _, existingPendingDevice := range newPendingDevices {
-				if existingPendingDevice.ID == pendingDevice.ID {
-					continue nextPendingDevice
-				}
-			}
-			newPendingDevices = append(newPendingDevices, pendingDevice)
-		}
-	}
-	cfg.PendingDevices = newPendingDevices
-
+func (cfg *Configuration) removeDeprecatedProtocols() {
 	// Deprecated protocols are removed from the list of listeners and
 	// device addresses. So far just kcp*.
 	for _, prefix := range []string{"kcp"} {
@@ -393,32 +360,26 @@ nextPendingDevice:
 			dev.Addresses = filterURLSchemePrefix(dev.Addresses, prefix)
 		}
 	}
+}
 
-	// Initialize any empty slices
-	if cfg.Folders == nil {
-		cfg.Folders = []FolderConfiguration{}
+func (cfg *Configuration) applyMigrations() {
+	if cfg.Version > 0 && cfg.Version < OldestHandledVersion {
+		l.Warnf("Configuration version %d is deprecated. Attempting best effort conversion, but please verify manually.", cfg.Version)
 	}
-	if cfg.IgnoredDevices == nil {
-		cfg.IgnoredDevices = []ObservedDevice{}
-	}
-	if cfg.PendingDevices == nil {
-		cfg.PendingDevices = []ObservedDevice{}
-	}
-	if cfg.Options.AlwaysLocalNets == nil {
-		cfg.Options.AlwaysLocalNets = []string{}
-	}
-	if cfg.Options.UnackedNotificationIDs == nil {
-		cfg.Options.UnackedNotificationIDs = []string{}
-	} else if cfg.GUI.User != "" && cfg.GUI.Password != "" {
-		for i, key := range cfg.Options.UnackedNotificationIDs {
-			if key == "authenticationUserAndPassword" {
-				cfg.Options.UnackedNotificationIDs = append(cfg.Options.UnackedNotificationIDs[:i], cfg.Options.UnackedNotificationIDs[i+1:]...)
-				break
-			}
+
+	// Upgrade configuration versions as appropriate
+	migrationsMut.Lock()
+	migrations.apply(cfg)
+	migrationsMut.Unlock()
+}
+
+func (cfg *Configuration) Device(id protocol.DeviceID) (DeviceConfiguration, int, bool) {
+	for i, device := range cfg.Devices {
+		if device.DeviceID == id {
+			return device, i, true
 		}
 	}
-
-	return nil
+	return DeviceConfiguration{}, 0, false
 }
 
 // DeviceMap returns a map of device ID to device configuration for the given configuration.
@@ -428,6 +389,80 @@ func (cfg *Configuration) DeviceMap() map[protocol.DeviceID]DeviceConfiguration 
 		m[dev.DeviceID] = dev
 	}
 	return m
+}
+
+func (cfg *Configuration) SetDevice(device DeviceConfiguration) {
+	cfg.SetDevices([]DeviceConfiguration{device})
+}
+
+func (cfg *Configuration) SetDevices(devices []DeviceConfiguration) {
+	inds := make(map[protocol.DeviceID]int, len(cfg.Devices))
+	for i, device := range cfg.Devices {
+		inds[device.DeviceID] = i
+	}
+	filtered := devices[:0]
+	for _, device := range devices {
+		if i, ok := inds[device.DeviceID]; ok {
+			cfg.Devices[i] = device
+		} else {
+			filtered = append(filtered, device)
+		}
+	}
+	cfg.Devices = append(cfg.Devices, filtered...)
+}
+
+func (cfg *Configuration) Folder(id string) (FolderConfiguration, int, bool) {
+	for i, folder := range cfg.Folders {
+		if folder.ID == id {
+			return folder, i, true
+		}
+	}
+	return FolderConfiguration{}, 0, false
+}
+
+// FolderMap returns a map of folder ID to folder configuration for the given configuration.
+func (cfg *Configuration) FolderMap() map[string]FolderConfiguration {
+	m := make(map[string]FolderConfiguration, len(cfg.Folders))
+	for _, folder := range cfg.Folders {
+		m[folder.ID] = folder
+	}
+	return m
+}
+
+// FolderPasswords returns the folder passwords set for this device, for
+// folders that have an encryption password set.
+func (cfg Configuration) FolderPasswords(device protocol.DeviceID) map[string]string {
+	res := make(map[string]string, len(cfg.Folders))
+nextFolder:
+	for _, folder := range cfg.Folders {
+		for _, dev := range folder.Devices {
+			if dev.DeviceID == device && dev.EncryptionPassword != "" {
+				res[folder.ID] = dev.EncryptionPassword
+				continue nextFolder
+			}
+		}
+	}
+	return res
+}
+
+func (cfg *Configuration) SetFolder(folder FolderConfiguration) {
+	cfg.SetFolders([]FolderConfiguration{folder})
+}
+
+func (cfg *Configuration) SetFolders(folders []FolderConfiguration) {
+	inds := make(map[string]int, len(cfg.Folders))
+	for i, folder := range cfg.Folders {
+		inds[folder.ID] = i
+	}
+	filtered := folders[:0]
+	for _, folder := range folders {
+		if i, ok := inds[folder.ID]; ok {
+			cfg.Folders[i] = folder
+		} else {
+			filtered = append(filtered, folder)
+		}
+	}
+	cfg.Folders = append(cfg.Folders, filtered...)
 }
 
 func ensureDevicePresent(devices []FolderDeviceConfiguration, myID protocol.DeviceID) []FolderDeviceConfiguration {
@@ -551,4 +586,20 @@ func getFreePort(host string, ports ...int) (int, error) {
 	addr := c.Addr().(*net.TCPAddr)
 	c.Close()
 	return addr.Port, nil
+}
+
+func (defaults *Defaults) prepare(myID protocol.DeviceID, existingDevices map[protocol.DeviceID]bool) {
+	ensureZeroForNodefault(&FolderConfiguration{}, &defaults.Folder)
+	ensureZeroForNodefault(&DeviceConfiguration{}, &defaults.Device)
+	defaults.Folder.prepare(myID, existingDevices)
+	defaults.Device.prepare(nil)
+}
+
+func ensureZeroForNodefault(empty interface{}, target interface{}) {
+	util.CopyMatchingTag(empty, target, "nodefault", func(v string) bool {
+		if len(v) > 0 && v != "true" {
+			panic(fmt.Sprintf(`unexpected tag value: %s. expected untagged or "true"`, v))
+		}
+		return len(v) > 0
+	})
 }

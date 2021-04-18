@@ -4,9 +4,6 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//go:generate go run ../../proto/scripts/protofmt.go local.proto
-//go:generate protoc -I ../../ -I . --gogofast_out=. local.proto
-
 package discover
 
 import (
@@ -24,8 +21,8 @@ import (
 	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/protocol"
 	"github.com/syncthing/syncthing/lib/rand"
-	"github.com/syncthing/syncthing/lib/util"
-	"github.com/thejerf/suture"
+	"github.com/syncthing/syncthing/lib/svcutil"
+	"github.com/thejerf/suture/v4"
 )
 
 type localClient struct {
@@ -52,9 +49,7 @@ const (
 
 func NewLocal(id protocol.DeviceID, addr string, addrList AddressLister, evLogger events.Logger) (FinderService, error) {
 	c := &localClient{
-		Supervisor: suture.New("local", suture.Spec{
-			PassThroughPanics: true,
-		}),
+		Supervisor:      suture.New("local", svcutil.SpecWithDebugLogger(l)),
 		myID:            id,
 		addrList:        addrList,
 		evLogger:        evLogger,
@@ -83,9 +78,9 @@ func NewLocal(id protocol.DeviceID, addr string, addrList AddressLister, evLogge
 		c.beacon = beacon.NewMulticast(addr)
 	}
 	c.Add(c.beacon)
-	c.Add(util.AsService(c.recvAnnouncements, fmt.Sprintf("%s/recv", c)))
+	c.Add(svcutil.AsService(c.recvAnnouncements, fmt.Sprintf("%s/recv", c)))
 
-	c.Add(util.AsService(c.sendLocalAnnouncements, fmt.Sprintf("%s/sendLocal", c)))
+	c.Add(svcutil.AsService(c.sendLocalAnnouncements, fmt.Sprintf("%s/sendLocal", c)))
 
 	return c, nil
 }
@@ -137,7 +132,7 @@ func (c *localClient) announcementPkt(instanceID int64, msg []byte) ([]byte, boo
 	return msg, true
 }
 
-func (c *localClient) sendLocalAnnouncements(ctx context.Context) {
+func (c *localClient) sendLocalAnnouncements(ctx context.Context) error {
 	var msg []byte
 	var ok bool
 	instanceID := rand.Int63()
@@ -150,18 +145,18 @@ func (c *localClient) sendLocalAnnouncements(ctx context.Context) {
 		case <-c.localBcastTick:
 		case <-c.forcedBcastTick:
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		}
 	}
 }
 
-func (c *localClient) recvAnnouncements(ctx context.Context) {
+func (c *localClient) recvAnnouncements(ctx context.Context) error {
 	b := c.beacon
 	warnedAbout := make(map[string]bool)
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		default:
 		}
 

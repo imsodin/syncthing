@@ -1,6 +1,6 @@
 .\" Man page generated from reStructuredText.
 .
-.TH "SYNCTHING-REST-API" "7" "Aug 16, 2020" "v1" "Syncthing"
+.TH "SYNCTHING-REST-API" "7" "Apr 13, 2021" "v1" "Syncthing"
 .SH NAME
 syncthing-rest-api \- REST API
 .
@@ -89,6 +89,10 @@ $ curl \-H "X\-API\-Key: yourkey" localhost:8384/rest/system/browse?current=/var
 .UNINDENT
 .SS GET /rest/system/config
 .sp
+Deprecated since version v1.12.0: This endpoint still works as before but is deprecated. Use rest\-config
+instead.
+
+.sp
 Returns the current configuration.
 .INDENT 0.0
 .INDENT 3.5
@@ -161,13 +165,6 @@ Returns the current configuration.
       "maxSendKbps": 0,
       "maxRecvKbps": 0,
       "ignoredFolders": [],
-      "pendingFolders": [
-        {
-          "time": "2019\-06\-05T10:21:22+02:00",
-          "id": "cpkn4\-57ysy",
-          "label": "SomeonesFolder"
-        }
-      ],
       "maxRequestKiB": 0
     }
   ],
@@ -248,14 +245,17 @@ Returns the current configuration.
     "databaseTuning": "auto",
     "maxConcurrentIncomingRequestKiB": 0
   },
-  "remoteIgnoredDevices": [],
-  "pendingDevices": []
+  "remoteIgnoredDevices": []
 }
 .ft P
 .fi
 .UNINDENT
 .UNINDENT
 .SS GET /rest/system/config/insync
+.sp
+Deprecated since version v1.12.0: This endpoint still works as before but is deprecated. Use
+rest\-config\-insync instead.
+
 .sp
 Returns whether the config is in sync, i.e. whether the running
 configuration is the same as that on disk.
@@ -272,6 +272,10 @@ configuration is the same as that on disk.
 .UNINDENT
 .UNINDENT
 .SS POST /rest/system/config
+.sp
+Deprecated since version v1.12.0: This endpoint still works as before but is deprecated. Use rest\-config
+instead.
+
 .sp
 Post the full contents of the configuration, in the same format as returned by
 the corresponding GET request. When posting the configuration succeeds,
@@ -678,6 +682,111 @@ Returns the current Syncthing version information.
 .fi
 .UNINDENT
 .UNINDENT
+.SH CONFIG ENDPOINTS
+.SS Config Endpoints
+.sp
+New in version 1.12.0.
+
+.sp
+These endpoints facilitate access and modification of the configuration in a granular way. Config sent to the endpoints must be in the same
+format as returned by the corresponding GET request. When posting the
+configuration succeeds, the posted configuration is immediately applied, except
+for changes that require a restart. Query \fI\%/rest/system/config/insync\fP to check if
+a restart is required.
+.sp
+For all endpoints supporting \fBPATCH\fP, it takes the existing config and
+unmarshals the given JSON object on top of it. This means all child objects will
+replace the existing objects, not extend them. For example for
+\fBRawListenAddresses\fP in options, which is an array of strings, sending
+\fB{RawListenAddresses: ["tcp://10.0.0.2"]}\fP will replace all existing listen
+addresses.
+.SS /rest/config
+.sp
+\fBGET\fP returns the entire config and \fBPUT\fP replaces it.
+.SS /rest/system/config/insync
+.sp
+\fBGET\fP returns whether the config is in sync, i.e. whether the running configuration is
+the same as that on disk or if a restart is required.
+.SS /rest/config/folders, /rest/config/devices
+.sp
+\fBGET\fP returns all folders respectively devices as an array. \fBPUT\fP takes an array and
+\fBPOST\fP a single object. In both cases if a given folder/device already exists,
+it’s replaced, otherwise a new one is added.
+.SS /rest/config/folders/*id*, /rest/config/devices/*id*
+.sp
+Put the desired folder\- respectively device\-ID in place of *id*. \fBGET\fP
+returns the folder/device for the given ID, \fBPUT\fP replaces the entire config
+and \fBPATCH\fP replaces only the given child objects.
+.SS /rest/config/options, /rest/config/ldap, /rest/config/gui
+.sp
+\fBGET\fP returns the respective object, \fBPUT\fP replaces the entire object and
+\fBPATCH\fP replaces only the given child objects.
+.SH CLUSTER ENDPOINTS
+.sp
+Concerns the mesh network structure.
+.SS GET /rest/cluster/pending/devices
+.sp
+New in version 1.13.0.
+
+.sp
+Lists remote devices which have tried to connect, but are not yet
+configured in our instance.
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.nf
+.ft C
+{
+  "P56IOI7\-MZJNU2Y\-IQGDREY\-DM2MGTI\-MGL3BXN\-PQ6W5BM\-TBBZ4TJ\-XZWICQ2": {
+    "time": "2020\-03\-18T11:43:07Z",
+    "name": "Friend Joe",
+    "address": "192.168.1.2:22000"
+  }
+}
+.ft P
+.fi
+.UNINDENT
+.UNINDENT
+.SS GET /rest/cluster/pending/folders
+.sp
+New in version 1.13.0.
+
+.sp
+Lists folders which remote devices have offered to us, but are not yet
+shared from our instance to them.  Takes the optional \fBdevice\fP
+parameter to only return folders offered by a specific remote device.
+Other offering devices are also omitted from the result.
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.nf
+.ft C
+{
+  "cpkn4\-57ysy": {
+    "offeredBy": {
+      "P56IOI7\-MZJNU2Y\-IQGDREY\-DM2MGTI\-MGL3BXN\-PQ6W5BM\-TBBZ4TJ\-XZWICQ2": {
+        "time": "2020\-03\-18T11:43:07Z",
+        "label": "Joe\(aqs folder"
+      },
+      "DOVII4U\-SQEEESM\-VZ2CVTC\-CJM4YN5\-QNV7DCU\-5U3ASRL\-YVFG6TH\-W5DV5AA": {
+        "time": "2020\-03\-01T10:12:13Z",
+        "label": "Jane\(aqs and Joe\(aqs folder"
+      }
+    }
+  },
+  "abcde\-fghij": {
+    "offeredBy": {
+      "P56IOI7\-MZJNU2Y\-IQGDREY\-DM2MGTI\-MGL3BXN\-PQ6W5BM\-TBBZ4TJ\-XZWICQ2": {
+        "time": "2020\-03\-18T11:43:07Z",
+        "label": "MyPics"
+      }
+    }
+  }
+}
+.ft P
+.fi
+.UNINDENT
+.UNINDENT
 .SH DATABASE ENDPOINTS
 .SS GET /rest/db/browse
 .sp
@@ -696,42 +805,53 @@ start building the structure.
 .sp
 .nf
 .ft C
-$ curl \-s http://localhost:8384/rest/db/browse?folder=default | json_pp
-{
-   "directory": {
-      "file": ["2015\-04\-20T22:20:45+09:00", 130940928],
-      "subdirectory": {
-         "another file": ["2015\-04\-20T22:20:45+09:00", 130940928]
-      }
-   },
-   "rootfile": ["2015\-04\-20T22:20:45+09:00", 130940928]
-}
-
-$ curl \-s http://localhost:8384/rest/db/browse?folder=default&levels=0 | json_pp
-{
-   "directory": {},
-   "rootfile": ["2015\-04\-20T22:20:45+09:00", 130940928]
-}
-
-$ curl \-s http://localhost:8384/rest/db/browse?folder=default&levels=1 | json_pp
-{
-   "directory": {
-      "file": ["2015\-04\-20T22:20:45+09:00", 130940928],
-      "subdirectory": {}
-   },
-   "rootfile": ["2015\-04\-20T22:20:45+09:00", 130940928]
-}
-
-$ curl \-s http://localhost:8384/rest/db/browse?folder=default&prefix=directory/subdirectory | json_pp
-{
-   "another file": ["2015\-04\-20T22:20:45+09:00", 130940928]
-}
-
-$ curl \-s http://localhost:8384/rest/db/browse?folder=default&prefix=directory&levels=0 | json_pp
-{
-   "file": ["2015\-04\-20T22:20:45+09:00", 130940928],
-   "subdirectory": {}
-}
+$ curl \-s http://localhost:8384/rest/db/browse?folder=j663y\-3ct3e&prefix=DCIM&levels=2
+[
+    {
+        "modTime" : "2020\-10\-02T23:48:52.076996974+02:00",
+        "name" : "100ANDRO",
+        "size" : 128,
+        "type" : "FILE_INFO_TYPE_DIRECTORY"
+    },
+    {
+        "children" : [
+            {
+                "modTime" : "2020\-12\-16T23:31:34.5009668+01:00",
+                "name" : "IMG_20201114_124821.jpg",
+                "size" : 10682189,
+                "type" : "FILE_INFO_TYPE_FILE"
+            },
+            {
+                "modTime" : "2020\-12\-16T23:31:35.0106367+01:00",
+                "name" : "IMG_20201213_122451.jpg",
+                "size" : 7936351,
+                "type" : "FILE_INFO_TYPE_FILE"
+            },
+            {
+                "modTime" : "2020\-12\-13T12:25:05.017097469+01:00",
+                "name" : "IMG_20201213_122504.jpg",
+                "size" : 8406507,
+                "type" : "FILE_INFO_TYPE_FILE"
+            },
+            {
+                "modTime" : "2020\-12\-13T12:25:06.127097469+01:00",
+                "name" : "IMG_20201213_122505.jpg",
+                "size" : 8381931,
+                "type" : "FILE_INFO_TYPE_FILE"
+            },
+            {
+                "modTime" : "2020\-12\-13T12:53:29.707298401+01:00",
+                "name" : "IMG_20201213_125329.jpg",
+                "size" : 4388331,
+                "type" : "FILE_INFO_TYPE_FILE"
+            },
+        ],
+        "modTime" : "2020\-10\-09T13:04:42.4410738+02:00",
+        "name" : "Camera",
+        "size" : 128,
+        "type" : "FILE_INFO_TYPE_DIRECTORY"
+    },
+]
 .ft P
 .fi
 .UNINDENT
