@@ -299,8 +299,10 @@ func (it *boltIterator) Error() error {
 func (it *boltIterator) Release() {
 	// Cursor doesn't need releasing. We might have created a transaction
 	// just for the iterator, and then we should close that.
-	it.tx.Rollback()
-	it.tx = nil
+	if it.tx != nil {
+		it.tx.Rollback()
+		it.tx = nil
+	}
 	it.done = true
 }
 
