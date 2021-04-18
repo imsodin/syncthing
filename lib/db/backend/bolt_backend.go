@@ -24,18 +24,18 @@ func OpenBolt(path string) (Backend, error) {
 	return newBoltBackend(path)
 }
 
-func OpenBoltMemory() (Backend, error) {
+func OpenBoltMemory() Backend {
 	f, err := ioutil.TempFile("", "syncthing-memorybolt-")
 	if err != nil {
-		return nil, err
+		panic(err)
 	}
 	f.Close()
 	b, err := newBoltBackend(f.Name())
 	if err != nil {
-		return nil, err
+		panic(err)
 	}
 	b.memory = true
-	return b, nil
+	return b
 }
 
 type boltBackend struct {
