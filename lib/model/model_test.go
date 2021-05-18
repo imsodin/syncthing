@@ -3128,7 +3128,7 @@ func TestRequestLimit(t *testing.T) {
 
 	file := "tmpfile"
 	befReq := time.Now()
-	first, err := m.Request(device1, "default", file, 0, 2000, 0, nil, 0, false)
+	first, err := m.Request(device1, "default", file, 0, protocol.MaxBlockSize+1, 0, nil, 0, false)
 	if err != nil {
 		t.Fatalf("First request failed: %v", err)
 	}

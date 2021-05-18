@@ -33,6 +33,14 @@ func (cfg *DeviceConfiguration) prepare(sharedFolders []string) {
 	}
 
 	cfg.IgnoredFolders = sortedObservedFolderSlice(ignoredFolders)
+
+	// 0: default, <0: no limiting
+	switch {
+	case cfg.MaxRequestKiB > 0 && cfg.MaxRequestKiB < minPullerMaxPendingKiB:
+		cfg.MaxRequestKiB = minPullerMaxPendingKiB
+	case cfg.MaxRequestKiB == 0:
+		cfg.MaxRequestKiB = defaultPullerMaxPendingKiB
+	}
 }
 
 func (cfg *DeviceConfiguration) IgnoredFolder(folder string) bool {

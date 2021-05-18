@@ -170,6 +170,9 @@ func (f *FolderConfiguration) DeviceIDs() []protocol.DeviceID {
 }
 
 func (f *FolderConfiguration) prepare(myID protocol.DeviceID, existingDevices map[protocol.DeviceID]bool) {
+	var defaultCfg FolderConfiguration
+	util.SetDefaults(&defaultCfg)
+
 	// Ensure that
 	// - any loose devices are not present in the wrong places
 	// - there are no duplicate devices
@@ -190,7 +193,23 @@ func (f *FolderConfiguration) prepare(myID protocol.DeviceID, existingDevices ma
 
 	if f.FSWatcherDelayS <= 0 {
 		f.FSWatcherEnabled = false
-		f.FSWatcherDelayS = 10
+		f.FSWatcherDelayS = defaultCfg.FSWatcherDelayS
+	}
+
+	if f.PullerPauseS <= 0 {
+		f.PullerPauseS = defaultCfg.PullerPauseS
+	}
+
+	if f.Copiers <= 0 {
+		f.Copiers = defaultCfg.Copiers
+	}
+
+	// If it's something non-zero but less than the protocol block size we
+	// adjust it upwards accordingly.
+	if f.PullerMaxPendingKiB == 0 {
+		f.PullerMaxPendingKiB = defaultPullerMaxPendingKiB
+	} else if f.PullerMaxPendingKiB < minPullerMaxPendingKiB {
+		f.PullerMaxPendingKiB = minPullerMaxPendingKiB
 	}
 
 	if f.Versioning.CleanupIntervalS > MaxRescanIntervalS {
@@ -200,7 +219,7 @@ func (f *FolderConfiguration) prepare(myID protocol.DeviceID, existingDevices ma
 	}
 
 	if f.WeakHashThresholdPct == 0 {
-		f.WeakHashThresholdPct = 25
+		f.WeakHashThresholdPct = defaultCfg.WeakHashThresholdPct
 	}
 
 	if f.MarkerName == "" {

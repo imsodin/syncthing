@@ -1065,9 +1065,6 @@ func (f *folder) setError(err error) {
 }
 
 func (f *folder) pullBasePause() time.Duration {
-	if f.PullerPauseS == 0 {
-		return defaultPullerPause
-	}
 	return time.Duration(f.PullerPauseS) * time.Second
 }
 

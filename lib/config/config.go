@@ -32,6 +32,9 @@ const (
 	OldestHandledVersion = 10
 	CurrentVersion       = 35
 	MaxRescanIntervalS   = 365 * 24 * 60 * 60
+
+	defaultPullerMaxPendingKiB = 2 * protocol.MaxBlockSize / 1024
+	minPullerMaxPendingKiB     = protocol.MaxBlockSize / 1024
 )
 
 var (

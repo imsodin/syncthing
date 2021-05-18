@@ -105,13 +105,7 @@ const (
 	dbUpdateInvalidate
 )
 
-const (
-	defaultCopiers          = 2
-	defaultPullerPause      = 60 * time.Second
-	defaultPullerPendingKiB = 2 * protocol.MaxBlockSize / 1024
-
-	maxPullerIterations = 3
-)
+const maxPullerIterations = 3
 
 type dbUpdateJob struct {
 	file    protocol.FileInfo
@@ -136,20 +130,6 @@ func newSendReceiveFolder(model *model, fset *db.FileSet, ignores *ignore.Matche
 		writeLimiter:       newByteSemaphore(cfg.MaxConcurrentWrites),
 	}
 	f.folder.puller = f
-
-	if f.Copiers == 0 {
-		f.Copiers = defaultCopiers
-	}
-
-	// If the configured max amount of pending data is zero, we use the
-	// default. If it's configured to something non-zero but less than the
-	// protocol block size we adjust it upwards accordingly.
-	if f.PullerMaxPendingKiB == 0 {
-		f.PullerMaxPendingKiB = defaultPullerPendingKiB
-	}
-	if blockSizeKiB := protocol.MaxBlockSize / 1024; f.PullerMaxPendingKiB < blockSizeKiB {
-		f.PullerMaxPendingKiB = blockSizeKiB
-	}
 
 	return f
 }

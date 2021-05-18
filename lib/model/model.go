@@ -2264,12 +2264,9 @@ func (m *model) AddConnection(conn protocol.Connection, hello protocol.Hello) {
 	m.closed[deviceID] = closed
 	m.deviceDownloads[deviceID] = newDeviceDownloadState()
 	m.indexSenders[deviceID] = newIndexSenderRegistry(conn, closed, m.Supervisor, m.evLogger)
-	// 0: default, <0: no limiting
-	switch {
-	case device.MaxRequestKiB > 0:
+	// <0: no limiting
+	if device.MaxRequestKiB > 0 {
 		m.connRequestLimiters[deviceID] = newByteSemaphore(1024 * device.MaxRequestKiB)
-	case device.MaxRequestKiB == 0:
-		m.connRequestLimiters[deviceID] = newByteSemaphore(1024 * defaultPullerPendingKiB)
 	}
 
 	m.helloMessages[deviceID] = hello
