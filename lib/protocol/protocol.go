@@ -92,20 +92,21 @@ const (
 
 // FileInfo.LocalFlags flags
 const (
-	FlagLocalUnsupported = 1 << 0 // The kind is unsupported, e.g. symlinks on Windows
-	FlagLocalIgnored     = 1 << 1 // Matches local ignore patterns
-	FlagLocalMustRescan  = 1 << 2 // Doesn't match content on disk, must be rechecked fully
-	FlagLocalReceiveOnly = 1 << 3 // Change detected on receive only folder
+	FlagLocalUnsupported             = 1 << 0 // The kind is unsupported, e.g. symlinks on Windows
+	FlagLocalIgnored                 = 1 << 1 // Matches local ignore patterns
+	FlagLocalMustRescan              = 1 << 2 // Doesn't match content on disk, must be rechecked fully
+	FlagLocalReceiveOnly             = 1 << 3 // Change detected on receive only folder
+	FlagLocalReceiveEncryptedDeleted = 1 << 4 // deleted in receive-encrypted folder that was previously FlagLocalReceiveOnly
 
 	// Flags that should result in the Invalid bit on outgoing updates
-	LocalInvalidFlags = FlagLocalUnsupported | FlagLocalIgnored | FlagLocalMustRescan | FlagLocalReceiveOnly
+	LocalInvalidFlags = FlagLocalUnsupported | FlagLocalIgnored | FlagLocalMustRescan | FlagLocalReceiveOnly | FlagLocalReceiveEncryptedDeleted
 
 	// Flags that should result in a file being in conflict with its
 	// successor, due to us not having an up to date picture of its state on
 	// disk.
-	LocalConflictFlags = FlagLocalUnsupported | FlagLocalIgnored | FlagLocalReceiveOnly
+	LocalConflictFlags = FlagLocalUnsupported | FlagLocalIgnored | FlagLocalReceiveOnly | FlagLocalReceiveEncryptedDeleted
 
-	LocalAllFlags = FlagLocalUnsupported | FlagLocalIgnored | FlagLocalMustRescan | FlagLocalReceiveOnly
+	LocalAllFlags = FlagLocalUnsupported | FlagLocalIgnored | FlagLocalMustRescan | FlagLocalReceiveOnly | FlagLocalReceiveEncryptedDeleted
 )
 
 var (
