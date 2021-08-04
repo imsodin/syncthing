@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pkg/errors"
 	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/connections/registry"
 	"github.com/syncthing/syncthing/lib/dialer"
@@ -64,7 +65,13 @@ func (t *tcpListener) serve(ctx context.Context) error {
 	defer listener.Close()
 
 	// We might bind to :0, so use the port we've been given.
-	tcaddr = listener.Addr().(*net.TCPAddr)
+	var ok bool
+	tcaddr, ok = listener.Addr().(*net.TCPAddr)
+	if !ok {
+		err := errors.New("listener has nil address")
+		l.Infoln("Listen (BEP/tcp):", err)
+		return err
+	}
 
 	t.notifyAddressesChanged(t)
 	defer t.clearAddresses(t)
