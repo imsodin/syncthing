@@ -95,6 +95,10 @@ func newIndexHandler(conn protocol.Connection, downloads *deviceDownloadState, f
 		l.Infof("Device %v folder %s has a new index ID (%v)", conn.ID().Short(), folder.Description(), startInfo.remote.IndexID)
 		fset.Drop(conn.ID())
 		fset.SetIndexID(conn.ID(), startInfo.remote.IndexID)
+	} else if startInfo.remote.MaxSequence == 0 {
+		// They are sending us everything from scratch - start from scratch as well.
+		l.Infof("Device %v folder %s starts resending all index metadata", conn.ID().Short(), folder.Description())
+		fset.Drop(conn.ID())
 	}
 
 	return &indexHandler{
@@ -539,7 +543,7 @@ func (r *indexHandlerRegistry) folderRunningLocked(folder config.FolderConfigura
 		delete(r.startInfos, folder.ID)
 		l.Debugf("Started index handler for device %v and folder %v in resume", r.conn.ID().Short(), folder.ID)
 	} else if isOk {
-		l.Debugf("Resuming index handler for device %v and folder %v", r.conn.ID().Short(), folder)
+		l.Debugf("Resuming index handler for device %v and folder %v", r.conn.ID().Short(), folder.Description())
 		is.resume(fset, runner)
 	} else {
 		l.Debugf("Not resuming index handler for device %v and folder %v as none is paused and there is no start info", r.conn.ID().Short(), folder.ID)
