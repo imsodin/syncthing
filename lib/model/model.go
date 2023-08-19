@@ -2253,10 +2253,10 @@ func (m *model) AddConnection(conn protocol.Connection, hello protocol.Hello) {
 	m.closed[deviceID] = closed
 	m.deviceDownloads[deviceID] = newDeviceDownloadState()
 	indexRegistry := newIndexHandlerRegistry(conn, m.deviceDownloads[deviceID], m.evLogger)
+	m.indexHandlers.Add(deviceID, indexRegistry)
 	for id, fcfg := range m.folderCfgs {
 		indexRegistry.RegisterFolderState(fcfg, m.folderFiles[id], m.folderRunners[id])
 	}
-	m.indexHandlers.Add(deviceID, indexRegistry)
 	m.fmut.RUnlock()
 	// 0: default, <0: no limiting
 	switch {

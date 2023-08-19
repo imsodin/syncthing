@@ -43,7 +43,7 @@ func newServiceMap[K comparable, S suture.Service](eventLogger events.Logger) *s
 func (s *serviceMap[K, S]) Add(k K, v S) {
 	if tok, ok := s.tokens[k]; ok {
 		// There is already a service at this key, remove it first.
-		s.supervisor.Remove(tok)
+		s.supervisor.RemoveAndWait(tok, 0)
 		s.eventLogger.Log(events.Failure, fmt.Sprintf("%s replaced service at key %v", s, k))
 	}
 	s.services[k] = v
