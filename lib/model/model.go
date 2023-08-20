@@ -1793,8 +1793,9 @@ func (m *model) Closed(conn protocol.Connection, err error) {
 	delete(m.remoteFolderStates, device)
 	closed := m.closed[device]
 	delete(m.closed, device)
-	m.indexHandlers.RemoveAndWait(device, 0)
+	_, indexHandlerDone := m.indexHandlers.RemoveWithWaitChan(device, 0)
 	m.pmut.Unlock()
+	<-indexHandlerDone
 
 	m.progressEmitter.temporaryIndexUnsubscribe(conn)
 	m.deviceDidClose(device, time.Since(conn.EstablishedAt()))

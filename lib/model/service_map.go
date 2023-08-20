@@ -83,6 +83,24 @@ func (s *serviceMap[K, S]) RemoveAndWait(k K, timeout time.Duration) (found bool
 	return found
 }
 
+// RemoveWithWaitChan does the same thing as RemoveAndWait, except that instead
+// of waiting for the service to stop, it returns a channel that will be closed
+// when it stopped (an already closed channel is returned if no service is
+// found).
+func (s *serviceMap[K, S]) RemoveWithWaitChan(k K, timeout time.Duration) (found bool, done chan struct{}) {
+	done = make(chan struct{})
+	if tok, ok := s.tokens[k]; ok {
+		found = true
+		go func() {
+			s.supervisor.RemoveAndWait(tok, timeout)
+			close(done)
+		}()
+	}
+	delete(s.services, k)
+	delete(s.tokens, k)
+	return found, done
+}
+
 // Each calls the given function for each service in the map.
 func (s *serviceMap[K, S]) Each(fn func(K, S)) {
 	for key, svc := range s.services {
