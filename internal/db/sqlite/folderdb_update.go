@@ -284,8 +284,10 @@ func (*folderDB) insertBlocksLocked(tx *txPreparedStmts, blocklistHash []byte, b
 	}
 
 	// Very large block lists (>8000 blocks) result in "too many variables"
-	// error. Chunk it to a reasonable size.
-	for chunk := range slices.Chunk(bs, 1000) {
+	// error. Chunking into protocol.DesiredPerFileBlocks, such that for all but
+	// the largest files we only need a single exec (there's a test to catch the
+	// error if this constant ever increases too much).
+	for chunk := range slices.Chunk(bs, protocol.DesiredPerFileBlocks) {
 		if _, err := tx.NamedExec(`
 			INSERT OR IGNORE INTO blocks (hash, blocklist_hash, idx, offset, size)
 			VALUES (:hash, :blocklist_hash, :idx, :offset, :size)
