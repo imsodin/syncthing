@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/syncthing/syncthing/internal/gen/dbproto"
@@ -75,6 +76,7 @@ func (s *folderDB) Update(device protocol.DeviceID, fs []protocol.FileInfo) erro
 	}
 
 	var prevRemoteSeq int64
+	bBatch := newBlocksBatch()
 	for i, f := range fs {
 		f.Name = osutil.NormalizedFilename(f.Name)
 
@@ -118,7 +120,7 @@ func (s *folderDB) Update(device protocol.DeviceID, fs []protocol.FileInfo) erro
 				return wrap(err, "insert blocklist")
 			} else if aff, _ := res.RowsAffected(); aff != 0 && device == protocol.LocalDeviceID {
 				// Insert all blocks
-				if err := s.insertBlocksLocked(txp, f.BlocksHash, f.Blocks); err != nil {
+				if err := bBatch.addLocked(txp, f.BlocksHash, f.Blocks); err != nil {
 					return wrap(err, "insert blocks")
 				}
 			}
@@ -142,6 +144,10 @@ func (s *folderDB) Update(device protocol.DeviceID, fs []protocol.FileInfo) erro
 		if err := s.recalcGlobalForFile(txp, f.Name); err != nil {
 			return wrap(err)
 		}
+	}
+
+	if err := bBatch.flush(txp); err != nil {
+		return wrap(err, "insert blocks")
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -266,32 +272,65 @@ func (s *folderDB) DropFilesNamed(device protocol.DeviceID, names []string) erro
 	return wrap(tx.Commit())
 }
 
-func (*folderDB) insertBlocksLocked(tx *txPreparedStmts, blocklistHash []byte, blocks []protocol.BlockInfo) error {
-	if len(blocks) == 0 {
-		return nil
+func blocksInsertSql(numBlocks int) string {
+	values := strings.Repeat("(?, ?, ?, ?, ?), ", numBlocks)
+	values = strings.TrimSuffix(values, ", ")
+	return fmt.Sprintf(`
+			INSERT OR IGNORE INTO blocks (hash, blocklist_hash, idx, offset, size)
+			VALUES %s
+	`, values)
+}
+
+const (
+	blocksPerBatch = 1000
+	argsPerBlock = 5
+)
+
+var blocksBatchInsertSql = blocksInsertSql(blocksPerBatch)
+
+type blocksBatch struct {
+	args []any
+}
+
+func newBlocksBatch() *blocksBatch {
+	return &blocksBatch{
+		args: make([]any, 0, argsPerBlock * blocksPerBatch),
 	}
-	bs := make([]map[string]any, len(blocks))
-	for i, b := range blocks {
-		bs[i] = map[string]any{
-			"hash":           b.Hash,
-			"blocklist_hash": blocklistHash,
-			"idx":            i,
-			"offset":         b.Offset,
-			"size":           b.Size,
+}
+
+func (b *blocksBatch) addLocked(tx *txPreparedStmts, blocklistHash []byte, blocks []protocol.BlockInfo) error {
+	for i, block := range blocks {
+		b.args = append(b.args, block.Hash, blocklistHash, i, block.Offset, block.Size)
+		if len(b.args) == blocksPerBatch * argsPerBlock {
+			if err := b.flush(tx); err != nil {
+				return wrap(err)
+			}
 		}
 	}
 
-	// Very large block lists (>8000 blocks) result in "too many variables"
-	// error. Chunk it to a reasonable size.
-	for chunk := range slices.Chunk(bs, 1000) {
-		if _, err := tx.NamedExec(`
-			INSERT OR IGNORE INTO blocks (hash, blocklist_hash, idx, offset, size)
-			VALUES (:hash, :blocklist_hash, :idx, :offset, :size)
-		`, chunk); err != nil {
-			return wrap(err)
-		}
-	}
 	return nil
+}
+
+func (b *blocksBatch) flush(tx *txPreparedStmts) error {
+	if len(b.args) == 0 {
+		return nil
+	}
+	defer func() {
+		b.args = b.args[:0]
+	}()
+
+	numBlocks := len(b.args) / argsPerBlock
+	if numBlocks < blocksPerBatch {
+		_, err := tx.Exec(blocksInsertSql(numBlocks), b.args...)
+		return wrap(err, "inserting partial block batch")
+	}
+
+	stmt, err := tx.Preparex(blocksBatchInsertSql)
+	if err != nil {
+		return wrap(err, "preparing block batch insert")
+	}
+	_, err = stmt.Exec(b.args...)
+	return wrap(err, "inserting block batch")
 }
 
 func (s *folderDB) recalcGlobalForFolder(txp *txPreparedStmts) error {
