@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/syncthing/syncthing/internal/gen/dbproto"
@@ -268,30 +269,49 @@ func (s *folderDB) DropFilesNamed(device protocol.DeviceID, names []string) erro
 	return wrap(tx.Commit())
 }
 
+const insertBlocksChunkSize = 50
+
+
+func insertBlocksSql(numBlocks int) string {
+	values := strings.Repeat("(?, ?, ?, ?, ?), ", numBlocks)
+	values = strings.TrimSuffix(values, ", ")
+	return fmt.Sprintf(`
+			INSERT OR IGNORE INTO blocks (hash, blocklist_hash, idx, offset, size)
+			VALUES %s
+	`, values)
+}
+
 func (*folderDB) insertBlocksLocked(tx *txPreparedStmts, blocklistHash []byte, blocks []protocol.BlockInfo) error {
 	if len(blocks) == 0 {
 		return nil
 	}
-	bs := make([]map[string]any, len(blocks))
+
+	blockArgs := make([]any, len(blocks) * 5)
 	for i, b := range blocks {
-		bs[i] = map[string]any{
-			"hash":           b.Hash,
-			"blocklist_hash": blocklistHash,
-			"idx":            i,
-			"offset":         b.Offset,
-			"size":           b.Size,
-		}
+		pos := i * 5
+		blockArgs[pos] = b.Hash
+		blockArgs[pos+1] = blocklistHash
+		blockArgs[pos+2] = i
+		blockArgs[pos+3] = b.Offset
+		blockArgs[pos+4] = b.Size
 	}
 
-	// Very large block lists (>8000 blocks) result in "too many variables"
-	// error. Chunking into protocol.DesiredPerFileBlocks, such that for all but
-	// the largest files we only need a single exec (there's a test to catch the
-	// error if this constant ever increases too much).
-	for chunk := range slices.Chunk(bs, protocol.DesiredPerFileBlocks) {
-		if _, err := tx.NamedExec(`
-			INSERT OR IGNORE INTO blocks (hash, blocklist_hash, idx, offset, size)
-			VALUES (:hash, :blocklist_hash, :idx, :offset, :size)
-		`, chunk); err != nil {
+	if len(blocks) < insertBlocksChunkSize {
+		_, err := tx.Exec(insertBlocksSql(len(blocks)), blockArgs...)
+		return wrap(err)
+	}
+
+	insertStmt, err := tx.Preparex(insertBlocksSql(insertBlocksChunkSize))
+	if err != nil {
+		return wrap(err, "preparing blocks insert")
+	}
+	for chunkArgs := range slices.Chunk(blockArgs, insertBlocksChunkSize * 5) {
+		if numBlocks := len(chunkArgs) / 5; numBlocks < insertBlocksChunkSize {
+			_, err = tx.Exec(insertBlocksSql(len(blocks)), blockArgs...)
+		} else {
+			_, err = insertStmt.Exec(chunkArgs...)
+		}
+		if err != nil {
 			return wrap(err)
 		}
 	}
