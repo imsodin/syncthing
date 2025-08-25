@@ -76,6 +76,7 @@ func (s *folderDB) Update(device protocol.DeviceID, fs []protocol.FileInfo) erro
 	}
 
 	var prevRemoteSeq int64
+	bBatch := newBlocksBatch()
 	for i, f := range fs {
 		f.Name = osutil.NormalizedFilename(f.Name)
 
@@ -121,7 +122,7 @@ func (s *folderDB) Update(device protocol.DeviceID, fs []protocol.FileInfo) erro
 
 			if device == protocol.LocalDeviceID {
 				// Insert all blocks
-				if err := s.insertBlocksLocked(txp, f.BlocksHash, f.Blocks); err != nil {
+				if err := bBatch.addLocked(txp, f.BlocksHash, f.Blocks); err != nil {
 					return wrap(err, "insert blocks")
 				}
 			}
@@ -145,6 +146,10 @@ func (s *folderDB) Update(device protocol.DeviceID, fs []protocol.FileInfo) erro
 		if err := s.recalcGlobalForFile(txp, f.Name); err != nil {
 			return wrap(err)
 		}
+	}
+
+	if err := bBatch.flush(txp); err != nil {
+		return wrap(err, "insert blocks")
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -269,50 +274,67 @@ func (s *folderDB) DropFilesNamed(device protocol.DeviceID, names []string) erro
 	return wrap(tx.Commit())
 }
 
-const insertBlocksChunkSize = 50
+const (
+	maxBlocksBatch = 1000
+	argsPerBlock = 5
+)
 
+var insertBlocksSqlByBlocks map[int]string
 
-func insertBlocksSql(numBlocks int) string {
-	values := strings.Repeat("(?, ?, ?, ?, ?), ", numBlocks)
-	values = strings.TrimSuffix(values, ", ")
-	return fmt.Sprintf(`
+func init() {
+	sqlForBlocks := func(numBlocks int) string {
+		values := strings.Repeat("(?, ?, ?, ?, ?), ", numBlocks)
+		values = strings.TrimSuffix(values, ", ")
+		return fmt.Sprintf(`
 			INSERT OR IGNORE INTO blocks (hash, blocklist_hash, idx, offset, size)
 			VALUES %s
 	`, values)
+	}
+	insertBlocksSqlByBlocks = make(map[int]string)
+	for blocks := maxBlocksBatch; blocks >= 1; blocks /= 10 {
+		insertBlocksSqlByBlocks[blocks] = sqlForBlocks(blocks)
+	}
 }
 
-func (*folderDB) insertBlocksLocked(tx *txPreparedStmts, blocklistHash []byte, blocks []protocol.BlockInfo) error {
-	if len(blocks) == 0 {
-		return nil
-	}
+type blocksBatch struct {
+	args []any
+}
 
-	blockArgs := make([]any, len(blocks) * 5)
-	for i, b := range blocks {
-		pos := i * 5
-		blockArgs[pos] = b.Hash
-		blockArgs[pos+1] = blocklistHash
-		blockArgs[pos+2] = i
-		blockArgs[pos+3] = b.Offset
-		blockArgs[pos+4] = b.Size
+func newBlocksBatch() *blocksBatch {
+	return &blocksBatch{
+		args: make([]any, 0, argsPerBlock * maxBlocksBatch),
 	}
+}
 
-	if len(blocks) < insertBlocksChunkSize {
-		_, err := tx.Exec(insertBlocksSql(len(blocks)), blockArgs...)
-		return wrap(err)
-	}
-
-	insertStmt, err := tx.Preparex(insertBlocksSql(insertBlocksChunkSize))
-	if err != nil {
-		return wrap(err, "preparing blocks insert")
-	}
-	for chunkArgs := range slices.Chunk(blockArgs, insertBlocksChunkSize * 5) {
-		if numBlocks := len(chunkArgs) / 5; numBlocks < insertBlocksChunkSize {
-			_, err = tx.Exec(insertBlocksSql(len(blocks)), blockArgs...)
-		} else {
-			_, err = insertStmt.Exec(chunkArgs...)
+func (b *blocksBatch) addLocked(tx *txPreparedStmts, blocklistHash []byte, blocks []protocol.BlockInfo) error {
+	for i, block := range blocks {
+		b.args = append(b.args, block.Hash, blocklistHash, i, block.Offset, block.Size)
+		if len(b.args) >= maxBlocksBatch * argsPerBlock {
+			if err := b.flush(tx); err != nil {
+				return wrap(err)
+			}
 		}
+	}
+
+	return nil
+}
+
+func (b *blocksBatch) flush(tx *txPreparedStmts) error {
+	args := b.args
+	b.args = b.args[:0]
+	for blocks := maxBlocksBatch; blocks >= 1; blocks /= 10 {
+		numArgs := argsPerBlock * blocks
+		if len(args) < numArgs {
+			continue
+		}
+		stmt, err := tx.Preparex(insertBlocksSqlByBlocks[blocks])
 		if err != nil {
-			return wrap(err)
+			return wrap(err, "preparing blocks insert")
+		}
+		for ; len(args) >= numArgs; args = args[numArgs:] {
+			if _, err := stmt.Exec(args[:numArgs]...); err != nil {
+				return wrap(err, "preparing blocks insert")
+			}
 		}
 	}
 	return nil
