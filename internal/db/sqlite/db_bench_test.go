@@ -60,10 +60,50 @@ func BenchmarkUpdate(b *testing.B) {
 			}
 		}
 
-		b.Run(fmt.Sprintf("n=Insert100Loc/size=%d", size), func(b *testing.B) {
+		b.Run(fmt.Sprintf("n=Insert100Loc64Blocks/size=%d", size), func(b *testing.B) {
 			for range b.N {
 				for i := range fs {
 					fs[i] = genFile(rand.String(24), 64, 0)
+				}
+				if err := db.Update(folderID, protocol.LocalDeviceID, fs); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.ReportMetric(float64(b.N)*100.0/b.Elapsed().Seconds(), "files/s")
+		})
+
+		b.Run(fmt.Sprintf("n=Insert100Loc5Blocks/size=%d", size), func(b *testing.B) {
+			for range b.N {
+				for i := range fs {
+					fs[i] = genFile(rand.String(24), 5, 0)
+				}
+				if err := db.Update(folderID, protocol.LocalDeviceID, fs); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.ReportMetric(float64(b.N)*100.0/b.Elapsed().Seconds(), "files/s")
+		})
+
+		b.Run(fmt.Sprintf("n=Insert10Loc10000Blocks/size=%d", size), func(b *testing.B) {
+			fs = fs[:10]
+			defer func() {
+				fs = fs[:100]
+			}()
+			for range b.N {
+				for i := range fs {
+					fs[i] = genFile(rand.String(24), 10000, 0)
+				}
+				if err := db.Update(folderID, protocol.LocalDeviceID, fs); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.ReportMetric(float64(b.N)*100.0/b.Elapsed().Seconds(), "files/s")
+		})
+
+		b.Run(fmt.Sprintf("n=Insert100LocRandBlocks/size=%d", size), func(b *testing.B) {
+			for range b.N {
+				for i := range fs {
+					fs[i] = genFile(rand.String(24), rand.Intn(2000), 0)
 				}
 				if err := db.Update(folderID, protocol.LocalDeviceID, fs); err != nil {
 					b.Fatal(err)

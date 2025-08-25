@@ -291,7 +291,7 @@ func runCommand(cmd string, target target) {
 		test(strings.Fields(extraTags), "github.com/syncthing/syncthing/internal/...", "github.com/syncthing/syncthing/lib/...", "github.com/syncthing/syncthing/cmd/...")
 
 	case "bench":
-		bench(strings.Fields(extraTags), "github.com/syncthing/syncthing/internal/...", "github.com/syncthing/syncthing/lib/...", "github.com/syncthing/syncthing/cmd/...")
+		bench(strings.Fields(extraTags), "github.com/syncthing/syncthing/internal/db/...")
 
 	case "integration":
 		integration(false)
@@ -412,7 +412,7 @@ func test(tags []string, pkgs ...string) {
 
 func bench(tags []string, pkgs ...string) {
 	lazyRebuildAssets()
-	args := append([]string{"test", "-run", "NONE", "-tags", strings.Join(tags, " ")}, benchArgs()...)
+	args := append([]string{"test", "-count", "10", "-run", "NONE", "-tags", strings.Join(tags, " ")}, benchArgs()...)
 	runPrint(goCmd, append(args, pkgs...)...)
 }
 
