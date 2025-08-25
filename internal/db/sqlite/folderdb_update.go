@@ -271,7 +271,6 @@ func (s *folderDB) DropFilesNamed(device protocol.DeviceID, names []string) erro
 
 const insertBlocksChunkSize = 50
 
-
 func insertBlocksSql(numBlocks int) string {
 	values := strings.Repeat("(?, ?, ?, ?, ?), ", numBlocks)
 	values = strings.TrimSuffix(values, ", ")
@@ -296,20 +295,33 @@ func (*folderDB) insertBlocksLocked(tx *txPreparedStmts, blocklistHash []byte, b
 		blockArgs[pos+4] = b.Size
 	}
 
-	if len(blocks) < insertBlocksChunkSize {
-		_, err := tx.Exec(insertBlocksSql(len(blocks)), blockArgs...)
-		return wrap(err)
+	insertOneStmt, err := tx.Preparex(insertBlocksSql(1))
+	if err != nil {
+		return wrap(err, "preparing blocks insert")
 	}
 
-	insertStmt, err := tx.Preparex(insertBlocksSql(insertBlocksChunkSize))
+	if len(blocks) < insertBlocksChunkSize {
+		for args := range slices.Chunk(blockArgs, 5) {
+			if _, err := insertOneStmt.Exec(args...); err != nil {
+				return wrap(err)
+			}
+		}
+	}
+
+	insertChunkStmt, err := tx.Preparex(insertBlocksSql(insertBlocksChunkSize))
 	if err != nil {
 		return wrap(err, "preparing blocks insert")
 	}
 	for chunkArgs := range slices.Chunk(blockArgs, insertBlocksChunkSize * 5) {
 		if numBlocks := len(chunkArgs) / 5; numBlocks < insertBlocksChunkSize {
-			_, err = tx.Exec(insertBlocksSql(len(blocks)), blockArgs...)
+			for args := range slices.Chunk(blockArgs, 5) {
+				if _, err := insertOneStmt.Exec(args...); err != nil {
+
+					return wrap(err)
+				}
+			}
 		} else {
-			_, err = insertStmt.Exec(chunkArgs...)
+			_, err = insertChunkStmt.Exec(chunkArgs...)
 		}
 		if err != nil {
 			return wrap(err)
