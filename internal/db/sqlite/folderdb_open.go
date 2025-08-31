@@ -23,6 +23,7 @@ type folderDB struct {
 func openFolderDB(folder, path string, deleteRetention time.Duration) (*folderDB, error) {
 	pragmas := []string{
 		"journal_mode = WAL",
+		"wal_autocheckpoint = -1",
 		"optimize = 0x10002",
 		"auto_vacuum = INCREMENTAL",
 		"default_temp_store = MEMORY",
