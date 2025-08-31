@@ -497,9 +497,9 @@ func (s *folderDB) periodicCheckpointLocked(fs []protocol.FileInfo) {
 		// Every 50th checkpoint becomes a truncate, in an effort to bring
 		// down the size now and then.
 		checkpointType := "RESTART"
-		if s.checkpointsCount > 50 {
-			checkpointType = "TRUNCATE"
-		}
+		// if s.checkpointsCount > 50 {
+		// 	checkpointType = "TRUNCATE"
+		// }
 		cmd := fmt.Sprintf(`PRAGMA wal_checkpoint(%s)`, checkpointType)
 		row := conn.QueryRowContext(context.Background(), cmd)
 
