@@ -49,11 +49,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS files_remote_sequence ON files (device_idx, re
     WHERE remote_sequence IS NOT NULL
 ;
 -- There can be only one file per folder, device, and name
-CREATE UNIQUE INDEX IF NOT EXISTS files_device_name ON files (device_idx, name)
+-- And we want to be able to look up & iterate files based on just folder and name
+CREATE UNIQUE INDEX IF NOT EXISTS files_name_device ON files (name, device_idx)
 ;
--- We want to be able to look up & iterate files based on just folder and name
-CREATE INDEX IF NOT EXISTS files_name_only ON files (name)
-;
+
 -- We want to be able to look up & iterate files based on blocks hash
-CREATE INDEX IF NOT EXISTS files_blocklist_hash_only ON files (blocklist_hash, device_idx) WHERE blocklist_hash IS NOT NULL
+CREATE INDEX IF NOT EXISTS files_blocklist_hash_only ON files (blocklist_hash) WHERE blocklist_hash IS NOT NULL
 ;
