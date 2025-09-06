@@ -34,6 +34,13 @@ func (s *folderDB) Update(device protocol.DeviceID, fs []protocol.FileInfo) erro
 	s.updateLock.Lock()
 	defer s.updateLock.Unlock()
 
+	// Do this before writing, as it increases the chance of a full checkpoint
+	// succeeding and thus stopping WAL growth when there's lots of reading: It
+	// succeeds when all read operations active now started after the last
+	// write. So any pause since last write helps, while it wouldn't on
+	// checkpointing right after the last, this write.
+	s.periodicCheckpointLocked(fs)
+
 	deviceIdx, err := s.deviceIdxLocked(device)
 	if err != nil {
 		return wrap(err)
@@ -148,7 +155,6 @@ func (s *folderDB) Update(device protocol.DeviceID, fs []protocol.FileInfo) erro
 		return wrap(err)
 	}
 
-	s.periodicCheckpointLocked(fs)
 	return nil
 }
 
