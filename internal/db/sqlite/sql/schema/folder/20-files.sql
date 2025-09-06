@@ -44,10 +44,6 @@ CREATE TABLE IF NOT EXISTS fileinfos (
     FOREIGN KEY(sequence) REFERENCES files(sequence) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
 ) STRICT
 ;
--- There can be only one file per folder, device, and remote sequence number
-CREATE UNIQUE INDEX IF NOT EXISTS files_remote_sequence ON files (device_idx, remote_sequence)
-    WHERE remote_sequence IS NOT NULL
-;
 -- There can be only one file per folder, device, and name
 -- And we want to be able to look up & iterate files based on just folder and name
 CREATE UNIQUE INDEX IF NOT EXISTS files_name_device ON files (name, device_idx)
