@@ -2195,6 +2195,64 @@ func TestIssue4357(t *testing.T) {
 	}
 }
 
+func TestDBCleanupForRemovedDevice(t *testing.T) {
+	w, fcfg := newDefaultCfgWrapper(t)
+	m := setupModel(t, w)
+
+	// Set up a basic connection with an index ID and add a file for the remote.
+	conn1 := addFakeConn(m, device1, fcfg.ID)
+	must(t, m.ClusterConfig(conn1, &protocol.ClusterConfig{
+		Folders: []protocol.Folder{
+			{
+				ID: "default",
+				Devices: []protocol.Device{
+					{ID: myID},
+					{
+						ID: device1,
+						IndexID: 1,
+					},
+				},
+			},
+		},
+	}))
+	must(t, m.Index(conn1, &protocol.Index{Folder: fcfg.ID, Files: genFiles(1)}))
+
+	// Ensure the setup worked i.e. the device and it's index ID is present in the DB.
+
+	folderDevices, err := m.sdb.ListDevicesForFolder(fcfg.ID)
+	must(t, err)
+	if len(folderDevices) != 1 || folderDevices[0] != device1 {
+		t.Fatal("device missing in DB after setup")
+	}
+
+	indexID, err := m.sdb.GetIndexID(fcfg.ID, device1)
+	must(t, err)
+	if indexID == 0 {
+		t.Fatal("device index ID missing in DB after setup")
+	}
+
+	// Drop the device entirely and then check if the device itself and its
+	// index ID is removed from the DB.
+
+	waiter, err := w.RemoveDevice(device1)
+	must(t, err)
+	waiter.Wait()
+
+	folderDevices, err = m.sdb.ListDevicesForFolder(fcfg.ID)
+	must(t, err)
+	if len(folderDevices) != 0 {
+		t.Error("device still present in DB after removing device")
+	}
+
+	// This second check isn't necessarily redundant - it did return a non-zero
+	// value despite no returned device before.
+	indexID, err = m.sdb.GetIndexID(fcfg.ID, device1)
+	must(t, err)
+	if indexID != 0 {
+		t.Error("device index ID still present in DB after removing device")
+	}
+}
+
 func TestIndexesForUnknownDevicesDropped(t *testing.T) {
 	m := newModel(t, defaultCfgWrapper, myID, nil)
 

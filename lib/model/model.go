@@ -3112,6 +3112,10 @@ func (m *model) CommitConfiguration(from, to config.Configuration) bool {
 	m.mut.RUnlock()
 	// Generating cluster-configs acquires the mutex.
 	m.sendClusterConfig(clusterConfigDevices.AsSlice())
+	// Looping again without holding the lock as DB operations may be slow (though hopefully not for this).
+	for _, id := range removedDevices {
+		m.sdb.DropDevice(id)
+	}
 
 	ignoredDevices := observedDeviceSet(to.IgnoredDevices)
 	m.cleanPending(toDevices, toFolders, ignoredDevices, removedFolders)
