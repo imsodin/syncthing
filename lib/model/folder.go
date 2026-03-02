@@ -1193,6 +1193,9 @@ func (f *folder) String() string {
 }
 
 func (f *folder) newScanError(path string, err error) {
+	if errors.Is(err, context.Canceled) {
+		return
+	}
 	f.errorsMut.Lock()
 	f.sl.Warn("Failed to scan", slogutil.FilePath(path), slogutil.Error(err))
 	f.scanErrors = append(f.scanErrors, FileError{
